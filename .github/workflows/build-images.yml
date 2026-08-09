@@ -83,4 +83,4 @@ jobs:
           echo "Pin this in docker-compose.yml before sharing the store widely:"
           docker buildx imagetools inspect \
             "${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.name }}:${{ matrix.tag }}" \
-            --format '{{ "{{" }}.Manifest.Digest{{ "}}" }}'
+            --format '{{.Manifest.Digest}}'
