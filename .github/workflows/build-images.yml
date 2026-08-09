@@ -1,0 +1,86 @@
+name: Publish images
+
+# No `paths:` filter on purpose. Configuring the store touches umbrel-app.yml
+# rather than images/, and a publish that silently does not run is worse than a
+# rebuild that was not strictly needed — the layer cache makes the latter cheap.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # An unconfigured store — placeholder URLs, or images still pointing at a
+  # local registry — must never be published. This is the gate, so it does NOT
+  # get continue-on-error.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet pyyaml
+      - name: Refuse to publish an unconfigured store
+        run: python3 test/validate_manifest.py --strict
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: umbrel-dogecoin-core
+            context: images/core
+            tag: "1.14.9"
+          - name: umbrel-dogecoin-ui
+            context: images/ui
+            tag: "1.0.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.name }}:${{ matrix.tag }}
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.name }}:latest
+          # GHCR links a package to a repository — and inherits its visibility —
+          # by reading this label. Without it both packages land orphaned and
+          # private, and you have to hunt through package settings.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: Show the digest to pin
+        run: |
+          echo "Pin this in docker-compose.yml before sharing the store widely:"
+          docker buildx imagetools inspect \
+            "${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.name }}:${{ matrix.tag }}" \
+            --format '{{ "{{" }}.Manifest.Digest{{ "}}" }}'

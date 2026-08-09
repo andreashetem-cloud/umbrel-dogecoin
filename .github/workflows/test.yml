@@ -1,0 +1,91 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # ubuntu-latest ships an externally-managed Python (PEP 668), so a bare
+      # `pip install` fails. setup-python gives us an interpreter we own.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Cache the Dogecoin Core release tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dogecoin-*.tar.gz
+          key: dogecoin-core-1.14.9-${{ runner.arch }}
+
+      - name: Entrypoint and config-generation suite
+        run: ./test/entrypoint.sh
+
+      - name: Integration suite
+        run: ./test/integration.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint the node Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: images/core/Dockerfile
+          failure-threshold: error
+
+      - name: Lint the dashboard Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: images/ui/Dockerfile
+          failure-threshold: error
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning \
+            images/core/entrypoint.sh \
+            images/core/healthcheck.sh \
+            doge-dogecoin-node/exports.sh \
+            scripts/*.sh \
+            test/*.sh
+
+  build:
+    # Proves the images actually build for both architectures on every change,
+    # without publishing anything. A multi-platform build with no exporter runs
+    # every stage for both platforms and discards the result.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build dogecoind (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: images/core
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+      - name: Build the dashboard (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: images/ui
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=max,scope=ui

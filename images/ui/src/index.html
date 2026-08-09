@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="referrer" content="no-referrer" />
+<title>Dogecoin Node</title>
+<style nonce="__CSP_NONCE__">
+  :root {
+    --bg: #0d0f14;
+    --panel: #161a22;
+    --panel-2: #1d222c;
+    --line: #262c38;
+    --text: #e9edf5;
+    --muted: #8b95a8;
+    --gold: #c2a633;
+    --gold-soft: #e3c95c;
+    --green: #3fbf7f;
+    --amber: #e0a33e;
+    --red: #e05c5c;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 24px 20px 56px;
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+  .hidden { display: none !important; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; flex-wrap: wrap; }
+  .logo {
+    width: 42px; height: 42px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--gold-soft), var(--gold) 65%, #8f7a1f);
+    display: grid; place-items: center; font-weight: 800; color: #241f08; font-size: 20px; flex-shrink: 0;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .pill {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 7px 13px; font-size: 13px; font-weight: 550;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 0 3px rgba(63,191,127,.15); }
+  .dot.sync { background: var(--amber); box-shadow: 0 0 0 3px rgba(224,163,62,.15); }
+  .dot.err { background: var(--red); box-shadow: 0 0 0 3px rgba(224,92,92,.15); }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+  .card h2 .count { color: var(--muted); font-weight: 600; }
+
+  .progress-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .progress-pct { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+  .progress-note { color: var(--muted); font-size: 13px; text-align: right; }
+  .bar { height: 9px; background: var(--panel-2); border-radius: 999px; overflow: hidden; position: relative; }
+  .bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--gold), var(--gold-soft));
+             border-radius: 999px; transition: width .6s ease; }
+  /* Headers-download phase: real progress is unknowable, so show motion instead
+     of an empty track that reads as "broken". */
+  .bar.indeterminate > i { width: 35% !important; animation: slide 1.6s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(320%); } }
+
+  .rate { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .rate b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rate .stall { color: var(--amber); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel-2); border-radius: 11px; padding: 13px 14px;
+          display: flex; flex-direction: column; justify-content: space-between; }
+  .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+             font-weight: 600; min-height: 2.2em; }
+  .stat .v { font-size: 19px; font-weight: 650; margin-top: 5px; letter-spacing: -0.01em; word-break: break-word; }
+  .stat .v small { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 3px; }
+
+  .table-wrap { overflow: auto; max-height: 360px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .06em; padding: 0 10px 8px 0; position: sticky; top: 0; background: var(--panel); }
+  td { padding: 7px 10px 7px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  td.empty { color: var(--muted); }
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 999px; background: var(--panel-2); color: var(--muted); font-weight: 600; }
+  .tag.in { color: var(--green); background: rgba(63,191,127,.12); }
+
+  .kv { display: grid; grid-template-columns: 190px 1fr; gap: 9px 14px; align-items: center; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+  button { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+           padding: 5px 11px; font-size: 12px; cursor: pointer; font-weight: 550; }
+  button:hover:not(:disabled) { border-color: var(--gold); color: var(--gold-soft); }
+  button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .copy-fallback { width: 100%; margin-top: 8px; background: var(--panel-2); color: var(--text);
+                   border: 1px solid var(--gold); border-radius: 8px; padding: 7px 9px;
+                   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+
+  .banner { border-radius: var(--radius); padding: 14px 16px; font-size: 13.5px; margin-bottom: 16px; line-height: 1.5; }
+  .banner.err { background: rgba(224,92,92,.1); border: 1px solid rgba(224,92,92,.35); color: #ffb4b4; }
+  .banner.warn { background: rgba(224,163,62,.1); border: 1px solid rgba(224,163,62,.35); color: #ffd79a; }
+  .banner.info { background: rgba(226,201,92,.08); border: 1px solid rgba(226,201,92,.28); color: #ecdda0; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 12px; line-height: 1.55; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 26px; }
+
+  @media (max-width: 620px) {
+    body { padding: 18px 14px 40px; }
+    .kv { grid-template-columns: 1fr; gap: 3px 0; }
+    .kv .k { margin-top: 8px; }
+    .pill { margin-left: 0; }
+    .stat .k { min-height: 0; }
+    /* A 5-column table cannot fit; stack each peer as a labelled card. */
+    .table-wrap { max-height: none; overflow: visible; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    thead { display: none; }
+    tr { border-top: 1px solid var(--line); padding: 9px 0; }
+    tr:first-child { border-top: 0; }
+    td { border: 0; padding: 2px 0; display: flex; justify-content: space-between; gap: 12px; }
+    td::before { content: attr(data-label); color: var(--muted); font-size: 11px;
+                 text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+    td.empty { display: block; }
+    td.empty::before { content: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar > i { transition: none; }
+    .bar.indeterminate > i { animation: none; width: 100% !important; opacity: .4; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" aria-hidden="true">Ð</div>
+  <div>
+    <h1>Dogecoin Node</h1>
+    <div class="sub" id="version">Connecting to dogecoind…</div>
+  </div>
+  <div class="pill" role="status" aria-live="polite">
+    <span class="dot" id="dot" aria-hidden="true"></span><span id="statusText">Connecting</span>
+  </div>
+</header>
+
+<div id="error" class="banner err hidden" role="alert"></div>
+<div id="warning" class="banner warn hidden" role="status"></div>
+
+<div class="card">
+  <h2 id="syncHeading">Blockchain sync</h2>
+  <div aria-live="polite">
+    <div class="progress-top">
+      <div class="progress-pct" id="pct">—</div>
+      <div class="progress-note" id="blocks">—</div>
+    </div>
+    <div class="bar" id="barWrap" role="progressbar"
+         aria-labelledby="syncHeading" aria-valuemin="0" aria-valuemax="100"><i id="bar"></i></div>
+    <div class="rate" id="rate"></div>
+  </div>
+  <div class="hint" id="syncHint">
+    The initial sync downloads and verifies the entire Dogecoin blockchain — roughly 150 GB. Leave it
+    running; it picks up where it left off after a restart.
+  </div>
+</div>
+
+<div class="card">
+  <h2>Node</h2>
+  <div class="grid">
+    <div class="stat"><div class="k">Connections</div><div class="v" id="conns">—</div></div>
+    <div class="stat"><div class="k">Mempool</div><div class="v" id="mempool">—</div></div>
+    <div class="stat"><div class="k">Hashrate</div><div class="v" id="hashrate">—</div></div>
+    <div class="stat"><div class="k">Blockchain on disk</div><div class="v" id="size">—</div></div>
+    <div class="stat"><div class="k">Difficulty</div><div class="v" id="difficulty">—</div></div>
+    <div class="stat"><div class="k" id="tipLabel">Chain tip age</div><div class="v" id="lastblock">—</div></div>
+    <div class="stat"><div class="k">Traffic <small>since start</small></div><div class="v" id="traffic">—</div></div>
+    <div class="stat"><div class="k">Network</div><div class="v" id="network">—</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Connect a wallet or app</h2>
+  <div class="kv">
+    <div class="k">RPC host (other Umbrel apps)</div><div class="v" id="rpcHost">—</div>
+    <div class="k">RPC host (your LAN)</div><div class="v" id="rpcLan">—</div>
+    <div class="k">RPC port</div><div class="v" id="rpcPort">—</div>
+    <div class="k">P2P port</div><div class="v" id="p2pPort">—</div>
+    <div class="k">RPC username</div>
+    <div class="v row">
+      <span id="rpcUser">—</span>
+      <button data-copy="rpcUser" type="button" aria-label="Copy RPC username" disabled>Copy</button>
+    </div>
+    <div class="k">RPC password</div>
+    <div class="v row">
+      <span id="rpcPass" aria-label="RPC password, hidden">••••••••••••</span>
+      <button id="reveal" type="button" aria-label="Show RPC password" aria-pressed="false" disabled>Show</button>
+      <button data-copy="rpcPass" type="button" aria-label="Copy RPC password" disabled>Copy</button>
+    </div>
+  </div>
+  <div id="copyFallback" class="hidden">
+    <div class="banner info">Your browser blocked the clipboard on an insecure connection. Select the
+      text below and copy it manually.</div>
+    <input class="copy-fallback" id="copyFallbackInput" type="text" readonly aria-label="Value to copy" />
+  </div>
+  <div class="hint">
+    RPC is reachable from your local network and from other Umbrel apps — never from the internet.
+    Do not forward port <span class="mono" id="rpcPortInline">22555</span> on your router. Port
+    <span class="mono" id="p2pPortInline">22556</span> is the one that is safe to forward, and doing so
+    lets other nodes connect to you.
+  </div>
+</div>
+
+<div class="card">
+  <h2>Peers <span class="count">(<span id="peerCount">0</span>)</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Address</th><th scope="col">Client</th><th scope="col">Height</th>
+          <th scope="col">Ping</th><th scope="col"><span class="visually-hidden">Direction</span></th>
+        </tr>
+      </thead>
+      <tbody id="peers"><tr><td colspan="5" class="empty">No peers yet…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="hint hidden" id="peerNote"></div>
+</div>
+
+<footer>Powered by Dogecoin Core · refreshes every 5 seconds</footer>
+
+<script nonce="__CSP_NONCE__">
+(function () {
+  'use strict';
+
+  var realPassword = '';
+  var revealed = false;
+  var credentialsLoaded = false;
+  var firstSeen = Date.now();
+  var history = [];          // [{t, blocks}] for the sync-rate estimate
+  var lastBlocks = null;
+  var lastProgressAt = Date.now();
+
+  function $(id) { return document.getElementById(id); }
+  function show(el, yes) { el.classList.toggle('hidden', !yes); }
+
+  function fmtInt(n) { return (Number(n) || 0).toLocaleString('en-US'); }
+
+  function fmtBytes(b) {
+    if (b === null || b === undefined) return '—';
+    b = Number(b) || 0;
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+    return b.toFixed(b >= 100 || i < 2 ? 0 : 1) + ' <small>' + units[i] + '</small>';
+  }
+
+  function fmtBytesShort(b) {
+    b = Number(b) || 0;
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+    return b.toFixed(b >= 100 || i < 2 ? 0 : 1) + units[i];
+  }
+
+  function fmtHash(h) {
+    h = Number(h) || 0;
+    var units = ['H/s', 'KH/s', 'MH/s', 'GH/s', 'TH/s', 'PH/s', 'EH/s'], i = 0;
+    while (h >= 1000 && i < units.length - 1) { h /= 1000; i++; }
+    return (h >= 100 ? h.toFixed(0) : h.toFixed(1)) + ' <small>' + units[i] + '</small>';
+  }
+
+  function fmtAgo(ts) {
+    if (!ts) return '—';
+    var s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (s < 60) return s + 's <small>ago</small>';
+    if (s < 3600) return Math.floor(s / 60) + 'm <small>ago</small>';
+    if (s < 86400) return Math.floor(s / 3600) + 'h <small>ago</small>';
+    return Math.floor(s / 86400) + 'd <small>ago</small>';
+  }
+
+  function fmtEta(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return null;
+    var d = Math.floor(seconds / 86400);
+    var h = Math.floor((seconds % 86400) / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return Math.max(1, m) + 'm';
+  }
+
+  function esc(str) {
+    return String(str == null ? '' : str).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function setError(msg) {
+    var el = $('error');
+    if (msg) { el.textContent = msg; show(el, true); } else { show(el, false); }
+  }
+
+  function setWarnings(list) {
+    var el = $('warning');
+    if (list && list.length) {
+      el.textContent = 'Dogecoin Core reports: ' + list.join(' · ');
+      show(el, true);
+    } else {
+      show(el, false);
+    }
+  }
+
+  // Blocks per minute over roughly the last two minutes of observations.
+  function syncRate(blocks) {
+    var now = Date.now();
+    if (lastBlocks === null || blocks > lastBlocks) lastProgressAt = now;
+    lastBlocks = blocks;
+    history.push({ t: now, blocks: blocks });
+    while (history.length > 2 && now - history[0].t > 120000) history.shift();
+    if (history.length < 2) return null;
+    var first = history[0];
+    var dt = (now - first.t) / 1000;
+    var db = blocks - first.blocks;
+    if (dt < 20) return null;              // too soon to say anything useful
+    return { perMinute: (db / dt) * 60, stalledFor: (now - lastProgressAt) / 1000 };
+  }
+
+  function renderRate(s) {
+    var el = $('rate');
+    if (s.synced) { el.textContent = ''; return; }
+
+    var rate = syncRate(s.blocks);
+    if (!rate) {
+      el.textContent = 'Measuring speed…';
+      return;
+    }
+    var parts = [];
+    if (rate.perMinute >= 0.5) {
+      parts.push('<b>' + Math.round(rate.perMinute).toLocaleString('en-US') + '</b> blocks/min');
+      var remaining = Math.max(0, s.headers - s.blocks);
+      var eta = fmtEta((remaining / rate.perMinute) * 60);
+      if (eta) parts.push('about <b>' + eta + '</b> to go');
+    } else if (rate.stalledFor > 300) {
+      parts.push('<span class="stall">No new blocks for ' +
+        Math.floor(rate.stalledFor / 60) + ' min — check the peer count below</span>');
+    } else {
+      parts.push('<b>&lt;1</b> block/min');
+    }
+    el.innerHTML = parts.join(' · ');
+  }
+
+  function prettyVersion(subversion) {
+    // "Shibetoshi:1.14.9" is the user agent; nobody outside Dogecoin knows that.
+    var m = /:([\d.]+)/.exec(subversion || '');
+    return m ? 'Dogecoin Core ' + m[1] : (subversion || 'unknown');
+  }
+
+  function render(s) {
+    setError(null);
+    setWarnings(s.warnings);
+
+    var bits = [prettyVersion(s.version)];
+    if (s.chain !== 'main') bits.push(s.chain);
+    if (s.pruned) bits.push('pruned');
+    $('version').textContent = bits.join(' · ');
+
+    // Headers arrive before blocks; until they do, percentages are meaningless.
+    var headersPhase = !s.synced && s.headers === 0;
+    var pct = Math.min(s.synced ? 100 : 99.99, (s.progress || 0) * 100);
+
+    $('barWrap').classList.toggle('indeterminate', headersPhase);
+    if (headersPhase) {
+      $('pct').textContent = 'Starting';
+      $('blocks').textContent = 'Downloading block headers…';
+      $('barWrap').removeAttribute('aria-valuenow');
+      $('barWrap').setAttribute('aria-valuetext', 'Downloading block headers');
+      $('rate').textContent = '';
+    } else {
+      $('pct').textContent = s.synced ? '100%' : pct.toFixed(2) + '%';
+      $('bar').style.width = (s.synced ? 100 : pct) + '%';
+      $('blocks').textContent = fmtInt(s.blocks) + ' of ' + fmtInt(s.headers) + ' blocks';
+      $('barWrap').setAttribute('aria-valuenow', (s.synced ? 100 : pct).toFixed(2));
+      $('barWrap').setAttribute('aria-valuetext',
+        (s.synced ? '100% — synced' : pct.toFixed(2) + '% — ' + fmtInt(s.blocks) + ' of ' + fmtInt(s.headers) + ' blocks'));
+      renderRate(s);
+    }
+    show($('syncHint'), !s.synced);
+
+    $('dot').className = 'dot ' + (s.synced ? 'ok' : 'sync');
+    $('statusText').textContent = s.synced ? 'Synced' : 'Syncing';
+
+    $('conns').innerHTML = fmtInt(s.connections) + ' <small>' + s.inbound + ' in / ' + s.outbound + ' out</small>';
+    $('mempool').innerHTML = fmtInt(s.mempool.size) + ' <small>txs</small>';
+    $('hashrate').innerHTML = fmtHash(s.networkHashps);
+    $('size').innerHTML = fmtBytes(s.sizeOnDisk);
+    $('difficulty').innerHTML = fmtInt(Math.round(s.difficulty));
+    $('lastblock').innerHTML = fmtAgo(s.medianTime) +
+      (s.synced ? '' : ' <small>catching up</small>');
+    $('traffic').innerHTML = '↓ ' + fmtBytesShort(s.traffic.received) +
+      ' <small>↑ ' + fmtBytesShort(s.traffic.sent) + '</small>';
+    $('network').innerHTML = s.torEnabled ? 'Tor <small>+ clearnet</small>' : 'Clearnet';
+
+    $('rpcHost').textContent = s.rpc.serviceHost;
+    $('rpcLan').textContent = s.rpc.lanHost;
+    $('rpcPort').textContent = s.rpc.port;
+    $('rpcPortInline').textContent = s.rpc.port;
+    $('p2pPort').textContent = s.rpc.p2pPort;
+    $('p2pPortInline').textContent = s.rpc.p2pPort;
+    $('rpcUser').textContent = s.rpc.user;
+
+    // The buttons do nothing useful until there is something to copy.
+    var buttons = document.querySelectorAll('[data-copy], #reveal');
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = false;
+
+    $('peerCount').textContent = fmtInt(s.connections);
+    var tbody = $('peers');
+    // A dashboard does not need every peer. Twelve is enough to see that
+    // connections are healthy and diverse, and it keeps the mobile page from
+    // turning into a mile of cards.
+    var shown = s.peers.slice(0, 12);
+    if (!s.peers.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No peers yet — the node is still finding some.</td></tr>';
+    } else {
+      tbody.innerHTML = shown.map(function (p) {
+        return '<tr>' +
+          '<td class="mono" data-label="Address">' + esc(p.addr) + '</td>' +
+          '<td class="mono" data-label="Client">' + esc(p.subver || '—') + '</td>' +
+          '<td data-label="Height">' + (p.height ? fmtInt(p.height) : '—') + '</td>' +
+          '<td data-label="Ping">' + (p.ping !== null ? p.ping + ' ms' : '—') + '</td>' +
+          '<td data-label="Direction">' +
+            (p.inbound ? '<span class="tag in">inbound</span>' : '<span class="tag">outbound</span>') +
+          '</td></tr>';
+      }).join('');
+    }
+    var total = Math.max(s.connections, s.peers.length);
+    var truncated = total > shown.length;
+    show($('peerNote'), truncated);
+    if (truncated) $('peerNote').textContent = 'Showing ' + shown.length + ' of ' + fmtInt(total) + ' peers.';
+  }
+
+  function loadCredentials() {
+    if (credentialsLoaded) return Promise.resolve();
+    return fetch('api/credentials', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (c) {
+        if (c && c.ok) { realPassword = c.password || ''; credentialsLoaded = true; }
+      })
+      .catch(function () { /* retried on the next click */ });
+  }
+
+  // umbrelOS is reached over plain HTTP, which is not a secure context, so
+  // navigator.clipboard is undefined there. Fall back to execCommand, and if
+  // that is gone too, show the value so it can be selected by hand. Never claim
+  // to have copied something we did not.
+  function copyText(text, button) {
+    var flash = function (label) {
+      var old = button.getAttribute('data-label-original') || button.textContent;
+      button.setAttribute('data-label-original', old);
+      button.textContent = label;
+      setTimeout(function () { button.textContent = old; }, 1400);
+    };
+
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(
+        function () { flash('Copied'); },
+        function () { manualCopy(text, button, flash); }
+      );
+      return;
+    }
+    manualCopy(text, button, flash);
+  }
+
+  function manualCopy(text, button, flash) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', 'readonly');
+    area.className = 'visually-hidden';
+    document.body.appendChild(area);
+    area.select();
+    var worked = false;
+    try { worked = document.execCommand('copy'); } catch (e) { worked = false; }
+    document.body.removeChild(area);
+
+    if (worked) { flash('Copied'); show($('copyFallback'), false); return; }
+
+    flash('Copy failed');
+    var input = $('copyFallbackInput');
+    input.value = text;
+    show($('copyFallback'), true);
+    input.focus();
+    input.select();
+  }
+
+  function poll() {
+    fetch('api/status', { cache: 'no-store' })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.body.ok) throw new Error(res.body.error || 'Node unavailable');
+        render(res.body);
+      })
+      .catch(function (e) {
+        // The raw message ("connect ECONNREFUSED 10.21.0.5:22555") helps nobody
+        // reading a dashboard. Keep it in the console for whoever needs it.
+        console.error('Status request failed:', e);
+        var startingUp = Date.now() - firstSeen < 120000;
+        $('dot').className = 'dot ' + (startingUp ? 'sync' : 'err');
+        $('statusText').textContent = startingUp ? 'Starting' : 'Unavailable';
+        $('version').textContent = 'Waiting for dogecoind…';
+        setError(startingUp
+          ? 'Waiting for Dogecoin Core to start. This normally takes a minute or two after installing ' +
+            'or restarting the app.'
+          : 'Cannot reach Dogecoin Core. Check the app logs with: ' +
+            'sudo docker logs --tail 50 doge-dogecoin-node_dogecoind_1');
+      });
+  }
+
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.getAttribute || t.disabled) return;
+
+    if (t.id === 'reveal') {
+      loadCredentials().then(function () {
+        revealed = !revealed;
+        t.textContent = revealed ? 'Hide' : 'Show';
+        t.setAttribute('aria-pressed', revealed ? 'true' : 'false');
+        t.setAttribute('aria-label', revealed ? 'Hide RPC password' : 'Show RPC password');
+        var span = $('rpcPass');
+        span.textContent = revealed ? (realPassword || 'unavailable — see the app logs') : '••••••••••••';
+        span.setAttribute('aria-label', revealed ? 'RPC password, shown' : 'RPC password, hidden');
+      });
+      return;
+    }
+
+    var key = t.getAttribute('data-copy');
+    if (!key) return;
+
+    loadCredentials().then(function () {
+      var text = key === 'rpcPass' ? realPassword : $(key).textContent;
+      if (!text || text === '—') return;
+      copyText(text, t);
+    });
+  });
+
+  poll();
+  setInterval(poll, 5000);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) poll();
+  });
+})();
+</script>
+</body>
+</html>
