@@ -27,8 +27,10 @@ description: >-
   live and why editing the running copy does not stick.
 
 
-  Heads up: the initial sync downloads roughly 150 GB and takes anywhere from several hours to a couple
-  of days. Much node. Very decentralised.
+  Runs pruned by default, so it keeps about 20 GB on disk instead of the full 150 GB. The initial sync
+  still downloads the whole chain over the network and takes several hours to a couple of days; after
+  that, old block data is discarded as it goes. Change PRUNE in the compose file for a full archival
+  node. Much node. Very decentralised.
 developer: Dogecoin Core developers
 website: https://dogecoin.com
 dependencies: []
@@ -44,7 +46,7 @@ path: ""
 defaultPassword: ""
 deterministicPassword: false
 torOnly: false
-installSize: 170000000000
+installSize: 30000000000
 releaseNotes: >-
   First release. Dogecoin Core 1.14.9 built from the official, PGP-signed release binaries, with a
   dashboard for sync status, peers and RPC connection details, optional Tor routing, and a hardened

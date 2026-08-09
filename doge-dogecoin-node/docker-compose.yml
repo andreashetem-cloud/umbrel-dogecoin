@@ -52,7 +52,7 @@ services:
       MAXUPLOADTARGET: "0"     # Daily upload cap in MiB. 0 = unlimited.
       MAXMEMPOOL: "300"        # Mempool cap in MB.
       PAR: "0"                 # Script verification threads. 0 = auto.
-      PRUNE: "0"               # 0 = full chain. Or e.g. 20000 for a ~20 GB pruned node.
+      PRUNE: "20000"           # ~20 GB pruned node. 0 = full chain (needs ~150 GB and growing).
       TXINDEX: "0"             # 1 = full transaction index (block explorers). Incompatible with PRUNE.
       DISABLE_WALLET: "1"      # 1 = no wallet, no wallet RPCs. Safest default for a validating node.
       PEERBLOOMFILTERS: "0"    # 1 = serve BIP37 SPV clients (a privacy and DoS trade-off).
