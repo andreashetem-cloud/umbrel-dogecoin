@@ -8,74 +8,74 @@
 <style nonce="__NONCE__">
 /*
   Design note. Solo mining is a lottery played against a petahash network, so
-  the page is built like an instrument panel for a very long shot: everything
-  is a measurement, nothing is a celebration. The palette comes from the
-  subject rather than from a UI kit — the warm brown-black of a coin tray,
-  Dogecoin's own brand gold, and a bone cream for figures. Numbers are set in
-  tabular monospace so a live-refreshing readout never shifts under your eye.
-  The one bold element is the distance scale: a logarithmic ruler showing how
-  close your best share came to a block. Everything else stays quiet.
+  this reads as an instrument panel for a very long shot: everything is a
+  measurement, nothing is a celebration — until a block is actually found, at
+  which point the whole page changes and says so unmistakably.
+
+  The palette comes from the subject rather than a UI kit: the warm brown-black
+  of a coin tray, Dogecoin's own brand gold, bone cream for figures. Numbers are
+  set in tabular monospace so a live-refreshing readout never shifts under the
+  eye. Charts are hand-drawn SVG — no libraries, because a nonce-based CSP
+  forbids external scripts and this must work with no internet at all.
 */
 :root{
-  --ink:#0f0d0a;
-  --panel:#17130e;
-  --panel-2:#1e1913;
-  --line:#2c251c;
-  --line-soft:#221c15;
-  --gold:#c2a633;
-  --gold-dim:#8a7726;
-  --cream:#f2e7ce;
-  --dim:#9a8b6d;
-  --dimmer:#6d6250;
-  --live:#8bb06b;
-  --warn:#d99e2b;
-  --bad:#d4614a;
+  --ink:#0f0d0a; --panel:#17130e; --panel-2:#1e1913;
+  --line:#2c251c; --line-soft:#221c15;
+  --gold:#c2a633; --gold-dim:#8a7726; --gold-bright:#e8c84a;
+  --cream:#f2e7ce; --dim:#9a8b6d; --dimmer:#6d6250;
+  --live:#8bb06b; --warn:#d99e2b; --bad:#d4614a;
   --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
-body{
-  margin:0;background:var(--ink);color:var(--cream);
-  font:15px/1.55 var(--sans);
-  padding:24px 20px 64px;
-  font-variant-numeric:tabular-nums;
-}
-.wrap{max-width:1000px;margin:0 auto}
+body{margin:0;background:var(--ink);color:var(--cream);font:15px/1.55 var(--sans);
+  padding:24px 20px 64px;font-variant-numeric:tabular-nums}
+body.block-found{background:#1a1305}
+.wrap{max-width:1060px;margin:0 auto}
 
 /* ---------- masthead ---------- */
 .mast{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;
   padding-bottom:14px;border-bottom:1px solid var(--line)}
 .mast h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
   display:flex;align-items:center;gap:9px}
-.beacon{width:7px;height:7px;border-radius:50%;background:var(--dimmer);flex:none;position:relative}
-.beacon.on{background:var(--live);box-shadow:0 0 0 0 rgba(139,176,107,.55);animation:pulse 2.6s ease-out infinite}
+.beacon{width:7px;height:7px;border-radius:50%;background:var(--dimmer);flex:none}
+.beacon.on{background:var(--live);animation:pulse 2.6s ease-out infinite}
 .beacon.off{background:var(--bad)}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(139,176,107,.5)}70%{box-shadow:0 0 0 7px rgba(139,176,107,0)}100%{box-shadow:0 0 0 0 rgba(139,176,107,0)}}
-.mast .meta{font:12px/1.4 var(--mono);color:var(--dim);letter-spacing:.02em}
+.mast .meta{font:12px/1.5 var(--mono);color:var(--dim);text-align:right}
 
-/* ---------- notice ---------- */
+/* ---------- block banner ---------- */
+.jackpot{display:none;margin:18px 0 0;border:1px solid var(--gold);background:linear-gradient(180deg,rgba(194,166,51,.18),rgba(194,166,51,.06));
+  border-radius:3px;padding:20px 22px}
+body.block-found .jackpot{display:block}
+.jackpot h2{margin:0 0 6px;font:600 22px/1.2 var(--sans);letter-spacing:0;text-transform:none;
+  color:var(--gold-bright);border:none;padding:0}
+.jackpot p{margin:0;font-size:14px;color:var(--cream)}
+.jackpot .num{font-family:var(--mono);color:var(--gold-bright)}
+
 .notice{display:none;margin:16px 0 0;padding:11px 14px;border-radius:2px;font-size:13.5px;
-  border-left:3px solid var(--warn);background:rgba(217,158,43,.07);color:var(--cream)}
+  border-left:3px solid var(--warn);background:rgba(217,158,43,.07)}
 .notice.show{display:block}
 .notice.bad{border-left-color:var(--bad);background:rgba(212,97,74,.08)}
 
 /* ---------- hero ---------- */
-.hero{padding:34px 0 10px}
-.eyebrow{font:11px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--dimmer)}
-.rate{display:flex;align-items:baseline;gap:12px;margin-top:12px;flex-wrap:wrap}
-.rate .n{font:600 clamp(48px,12vw,86px)/0.9 var(--mono);letter-spacing:-.03em;color:var(--cream)}
-.rate .u{font:500 20px/1 var(--mono);color:var(--gold);letter-spacing:.02em}
-.rate .aside{font:12px/1.5 var(--mono);color:var(--dim);margin-left:auto;text-align:right}
+.hero{display:grid;grid-template-columns:1.35fr 1fr;gap:1px;background:var(--line-soft);
+  border:1px solid var(--line-soft);margin-top:22px}
+.hero > div{background:var(--panel);padding:22px 22px 20px}
+.eyebrow{font:11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--dimmer)}
+.big{display:flex;align-items:baseline;gap:10px;margin-top:12px;flex-wrap:wrap}
+.big .n{font:600 clamp(38px,7vw,62px)/0.92 var(--mono);letter-spacing:-.03em}
+.big .u{font:500 17px/1 var(--mono);color:var(--gold)}
+.sub{font:12px/1.6 var(--mono);color:var(--dim);margin-top:10px}
+.hero .best .n{color:var(--gold-bright)}
 
-/* ---------- the distance scale (signature) ---------- */
-.scale{margin-top:34px;padding:20px 0 0;border-top:1px solid var(--line)}
-.scale .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-.scale .title{font:11px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--dimmer)}
+/* ---------- ruler ---------- */
+.scale{margin-top:30px;padding-top:20px;border-top:1px solid var(--line)}
+.scale .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.scale .title{font:11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--dimmer)}
 .scale .verdict{font:13px/1.4 var(--mono);color:var(--dim)}
 .scale .verdict b{color:var(--gold);font-weight:500}
-/* The plot is inset so the labels at 0% and 100% have room to sit centred
-   without pushing the page wider than the viewport. */
 .ruler{height:58px}
 .plot{position:relative;height:58px;margin:0 34px}
 .plot .track{position:absolute;left:0;right:0;top:26px;height:2px;background:var(--line)}
@@ -86,32 +86,51 @@ body{
 .plot .you{position:absolute;top:12px;transform:translateX(-50%);text-align:center;transition:left .6s cubic-bezier(.2,.8,.2,1)}
 .plot .you span{display:block;width:2px;height:30px;background:var(--gold);margin:0 auto}
 .plot .you i{display:block;font:10px/1 var(--mono);color:var(--gold);margin-top:5px;font-style:normal;white-space:nowrap}
-.scale .foot{margin-top:14px;font-size:13px;color:var(--dim);max-width:62ch}
+.scale .foot{margin-top:14px;font-size:13px;color:var(--dim);max-width:64ch}
 
-/* ---------- figures ---------- */
-.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:1px;background:var(--line-soft);
-  border:1px solid var(--line-soft);margin-top:36px}
+/* ---------- figure grid ---------- */
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line-soft);
+  border:1px solid var(--line-soft);margin-top:30px}
 .fig{background:var(--panel);padding:15px 16px}
-.fig .k{font:10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--dimmer)}
-.fig .v{font:500 25px/1.15 var(--mono);margin-top:9px;letter-spacing:-.02em;word-break:break-word}
+.fig .k{font:10px/1 var(--mono);letter-spacing:.15em;text-transform:uppercase;color:var(--dimmer)}
+.fig .v{font:500 24px/1.15 var(--mono);margin-top:9px;letter-spacing:-.02em;word-break:break-word}
 .fig .s{font:11.5px/1.4 var(--mono);color:var(--dim);margin-top:5px}
-.fig .v.good{color:var(--live)} .fig .v.warnc{color:var(--warn)}
+.fig .v.good{color:var(--live)} .fig .v.warnc{color:var(--warn)} .fig .v.badc{color:var(--bad)}
+.fig .v.gold{color:var(--gold-bright)}
 
-/* ---------- sections ---------- */
-h2{font:11px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--dimmer);
-  margin:44px 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+h2{font:11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--dimmer);
+  margin:42px 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line);
+  display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h2 .aside{font-size:11px;letter-spacing:.06em;text-transform:none;color:var(--dimmer)}
 
+/* ---------- charts ---------- */
+.chart{background:var(--panel);border:1px solid var(--line-soft);padding:14px 16px 10px}
+.chart + .chart{margin-top:14px}
+.chart .ctop{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.chart .ctitle{font:11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--dimmer)}
+.chart .cnote{font:11.5px/1.4 var(--mono);color:var(--dim)}
+svg{display:block;width:100%;height:auto;min-height:130px}
+.grid-line{stroke:var(--line-soft);stroke-width:1}
+.axis-text{fill:var(--dimmer);font-family:var(--mono);font-size:9px}
+.series{fill:none;stroke:var(--gold);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
+.series-area{fill:rgba(194,166,51,.10);stroke:none}
+.dot{fill:var(--gold-dim)}
+.dot.best{fill:var(--gold-bright)}
+.target-line{stroke:var(--bad);stroke-width:1;stroke-dasharray:3 3}
+.tabs{display:flex;gap:6px}
+.tabs button.on{color:var(--cream);border-color:var(--gold-dim)}
+
+/* ---------- tables ---------- */
 table{width:100%;border-collapse:collapse}
-th{text-align:left;font:10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--dimmer);
+th{text-align:left;font:10px/1 var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--dimmer);
   font-weight:400;padding:0 12px 10px 0}
 th.r,td.r{text-align:right;padding-right:0}
 td{padding:13px 12px 13px 0;border-top:1px solid var(--line-soft);vertical-align:middle;font-size:14px}
 td.num{font-family:var(--mono);font-size:13.5px}
-.wname{font-family:var(--mono);font-size:13.5px;color:var(--cream);word-break:break-all}
+.wname{font-family:var(--mono);font-size:13.5px;word-break:break-all}
 .wsub{font:11.5px/1.5 var(--mono);color:var(--dimmer);margin-top:3px;word-break:break-all}
+.unit{font:11.5px/1.5 var(--mono);color:var(--dimmer)}
 
-/* Bar heights come from classes, not style attributes: a nonce-based CSP
-   blocks inline styles, so `style="height:9px"` would silently draw nothing. */
 .spark{display:flex;align-items:flex-end;gap:2px;height:22px;min-width:90px}
 .spark i{flex:1;min-width:2px;background:var(--gold-dim);border-radius:1px;display:block;height:2px}
 .spark i.fresh{background:var(--gold)}
@@ -120,38 +139,42 @@ td.num{font-family:var(--mono);font-size:13.5px}
 .spark i.h3{height:8px}.spark i.h4{height:10px}.spark i.h5{height:12px}
 .spark i.h6{height:14px}.spark i.h7{height:16px}.spark i.h8{height:18px}
 .spark i.h9{height:20px}.spark i.h10{height:22px}
-.unit{font:11.5px/1.5 var(--mono);color:var(--dimmer)}
 
 .tag{display:inline-block;font:11px/1.7 var(--mono);padding:0 7px;border-radius:2px;
   background:var(--panel-2);color:var(--dim);border:1px solid var(--line)}
 .tag.good{color:var(--live);border-color:rgba(139,176,107,.35)}
 .tag.bad{color:var(--bad);border-color:rgba(212,97,74,.35)}
+.tag.warn{color:var(--warn);border-color:rgba(217,158,43,.35)}
 
-/* ---------- key/value panel ---------- */
+/* ---------- key/value ---------- */
 .kv{border:1px solid var(--line-soft)}
 .kv .r{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;
   padding:12px 16px;border-top:1px solid var(--line-soft);background:var(--panel)}
 .kv .r:first-child{border-top:none}
 .kv .k{font-size:13.5px;color:var(--dim);flex:none}
 .kv .v{font:13.5px/1.5 var(--mono);word-break:break-all;text-align:right;flex:1 1 auto;min-width:0}
+.kv .v .trend{color:var(--dimmer);font-size:11.5px}
 button{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:2px;
   padding:3px 10px;font:11px/1.6 var(--mono);letter-spacing:.06em;text-transform:uppercase;cursor:pointer;flex:none}
 button:hover{color:var(--cream);border-color:var(--gold-dim)}
 button:focus-visible,a:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 
-.empty{padding:16px 0;color:var(--dim);font-size:13.5px;max-width:66ch}
+.empty{padding:16px 0;color:var(--dim);font-size:13.5px;max-width:68ch}
 footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
   font:11.5px/1.8 var(--mono);color:var(--dimmer)}
 
+@media (max-width:820px){ .hero{grid-template-columns:1fr} }
 @media (max-width:640px){
   body{padding:18px 14px 48px}
-  .rate .aside{margin-left:0;text-align:left;width:100%}
   th.hide,td.hide{display:none}
   .figs{grid-template-columns:repeat(2,1fr)}
+  /* At phone width the 700-unit viewBox scales 9px axis text down to under
+     4 real pixels, which is a grey smudge. Grow the type instead. */
+  .axis-text{font-size:16px}
+  svg{min-height:150px}
+  th.r,td.r{padding-left:10px}
 }
-@media (prefers-reduced-motion:reduce){
-  *{animation:none!important;transition:none!important}
-}
+@media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
 </style>
 </head>
 <body>
@@ -162,13 +185,24 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <div class="meta" id="mastMeta">connecting</div>
   </div>
 
+  <section class="jackpot" id="jackpot">
+    <h2>A block was found</h2>
+    <p id="jackpotText"></p>
+    <p><button id="dismissAlarm">Dismiss</button></p>
+  </section>
+
   <div class="notice" id="notice"></div>
 
   <section class="hero">
-    <div class="eyebrow">Combined hashrate</div>
-    <div class="rate">
-      <span class="n" id="hr">—</span><span class="u" id="hrUnit"></span>
-      <span class="aside" id="hrAside"></span>
+    <div>
+      <div class="eyebrow">Combined hashrate</div>
+      <div class="big"><span class="n" id="hr">—</span><span class="u" id="hrUnit"></span></div>
+      <div class="sub" id="hrSub"></div>
+    </div>
+    <div class="best">
+      <div class="eyebrow">Best share ever</div>
+      <div class="big"><span class="n" id="best">—</span><span class="u" id="bestPct"></span></div>
+      <div class="sub" id="bestSub"></div>
     </div>
   </section>
 
@@ -177,22 +211,53 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
       <span class="title">Distance to a block</span>
       <span class="verdict" id="verdict"></span>
     </div>
-    <div class="ruler">
-      <div class="plot" id="plot">
-        <div class="track"></div>
-        <div class="fill" id="rulerFill"></div>
-        <div class="you" id="rulerYou"><span></span><i id="rulerLabel"></i></div>
-      </div>
-    </div>
+    <div class="ruler"><div class="plot" id="plot">
+      <div class="track"></div>
+      <div class="fill" id="rulerFill"></div>
+      <div class="you" id="rulerYou"><span></span><i id="rulerLabel"></i></div>
+    </div></div>
     <p class="foot" id="scaleFoot"></p>
   </section>
 
   <section class="figs">
     <div class="fig"><div class="k">Workers</div><div class="v" id="fWorkers">—</div><div class="s" id="fWorkersSub"></div></div>
     <div class="fig"><div class="k">Shares</div><div class="v" id="fShares">—</div><div class="s" id="fSharesSub"></div></div>
+    <div class="fig"><div class="k">Work done</div><div class="v" id="fLuck">—</div><div class="s" id="fLuckSub">measured against one block</div></div>
     <div class="fig"><div class="k">Blocks found</div><div class="v" id="fBlocks">—</div><div class="s" id="fBlocksSub"></div></div>
-    <div class="fig"><div class="k">Expected wait</div><div class="v" id="fEta">—</div><div class="s">at current hashrate</div></div>
+    <div class="fig"><div class="k">Expected wait</div><div class="v" id="fEta">—</div><div class="s" id="fEtaSub">average, not a countdown</div></div>
   </section>
+
+  <h2>Chance of a block <span class="aside" id="oddsAside"></span></h2>
+  <div class="kv">
+    <div class="r"><span class="k">In the next 24 hours</span><span class="v" id="pDay">—</span></div>
+    <div class="r"><span class="k">In the next month</span><span class="v" id="pMonth">—</span></div>
+    <div class="r"><span class="k">In the next year</span><span class="v" id="pYear">—</span></div>
+    <div class="r"><span class="k">In the next ten years</span><span class="v" id="pTen">—</span></div>
+  </div>
+  <p class="empty">These are Poisson probabilities at your current hashrate and the average difficulty over recent blocks. A block is memoryless: mining for a year without one does not make the next year any more likely.</p>
+
+  <h2>Hashrate over time <span class="aside" id="chartAside"></span></h2>
+  <div class="chart">
+    <div class="ctop">
+      <span class="ctitle" id="hrChartTitle">last 24 hours</span>
+      <span class="tabs">
+        <button data-range="1h">1h</button>
+        <button data-range="24h" class="on">24h</button>
+        <button data-range="30d">30d</button>
+      </span>
+    </div>
+    <svg id="hrChart" viewBox="0 0 700 180" preserveAspectRatio="none" role="img" aria-label="Hashrate over time"></svg>
+    <div class="cnote" id="hrChartNote"></div>
+  </div>
+
+  <div class="chart">
+    <div class="ctop">
+      <span class="ctitle">every share, by difficulty</span>
+      <span class="cnote">logarithmic — the dashed line is a block</span>
+    </div>
+    <svg id="shareChart" viewBox="0 0 700 180" preserveAspectRatio="none" role="img" aria-label="Share difficulty over time"></svg>
+    <div class="cnote" id="shareChartNote"></div>
+  </div>
 
   <h2>Workers</h2>
   <div id="workers"></div>
@@ -208,12 +273,15 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
   <h2>Network</h2>
   <div class="kv">
     <div class="r"><span class="k">Block height</span><span class="v" id="nHeight">—</span></div>
-    <div class="r"><span class="k">Network difficulty</span><span class="v" id="nDiff">—</span></div>
+    <div class="r"><span class="k">Difficulty now</span><span class="v" id="nDiff">—</span></div>
+    <div class="r"><span class="k">Difficulty, recent average</span><span class="v" id="nDiffAvg">—</span></div>
     <div class="r"><span class="k">Network hashrate</span><span class="v" id="nHash">—</span></div>
     <div class="r"><span class="k">Your share of it</span><span class="v" id="nShare">—</span></div>
     <div class="r"><span class="k">Block reward right now</span><span class="v" id="nReward">—</span></div>
+    <div class="r"><span class="k">Round-trip to your node</span><span class="v" id="nPing">—</span></div>
     <div class="r"><span class="k">Template age</span><span class="v" id="nTemplate">—</span></div>
   </div>
+  <p class="empty" id="diffNote"></p>
 
   <h2>Blocks</h2>
   <div id="blocks"></div>
@@ -224,8 +292,9 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
 <script nonce="__NONCE__">
 'use strict';
 const $ = (id) => document.getElementById(id);
-const HASHES_PER_SHARE_UNIT = 65536; // scrypt stratum convention
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
+/* ---------- formatting ---------- */
 function hashrate(h){
   if(!h || !isFinite(h) || h <= 0) return {n:'0', u:'H/s'};
   const units = ['H/s','kH/s','MH/s','GH/s','TH/s','PH/s','EH/s'];
@@ -234,15 +303,13 @@ function hashrate(h){
   return {n: v >= 100 ? v.toFixed(1) : v.toFixed(2), u: units[i]};
 }
 function compact(n){
-  if(!isFinite(n) || n == null) return '—';
+  if(n == null || !isFinite(n)) return '—';
   if(n >= 1e12) return (n/1e12).toFixed(2)+'T';
   if(n >= 1e9) return (n/1e9).toFixed(2)+'G';
   if(n >= 1e6) return (n/1e6).toFixed(2)+'M';
   if(n >= 1e3) return (n/1e3).toFixed(2)+'k';
   if(n >= 1) return n.toFixed(n >= 100 ? 0 : 2);
   if(n === 0) return '0';
-  // Never round a small-but-real number down to "0.000" — on a testnet, or for
-  // a share difficulty, that is the whole value.
   if(n >= 0.001) return n.toFixed(3);
   return n.toExponential(2);
 }
@@ -252,6 +319,7 @@ function percent(fraction){
   if(p >= 100) return '100%';
   if(p >= 1) return p.toFixed(1) + '%';
   if(p >= 0.001) return p.toFixed(3) + '%';
+  if(p >= 0.00001) return p.toFixed(6) + '%';
   return p.toExponential(1) + '%';
 }
 function duration(s){
@@ -275,28 +343,22 @@ function esc(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-/* copy ------------------------------------------------------------------ */
-function flash(btn){
-  const prev = btn.textContent;
-  btn.textContent = 'Copied';
-  setTimeout(() => { btn.textContent = prev; }, 1300);
-}
+/* ---------- copy ---------- */
+function flash(btn){ const p = btn.textContent; btn.textContent='Copied'; setTimeout(()=>{btn.textContent=p;},1300); }
 function copy(text, btn){
   if(navigator.clipboard && window.isSecureContext){
-    navigator.clipboard.writeText(text).then(() => flash(btn)).catch(() => fallbackCopy(text, btn));
-  } else {
-    fallbackCopy(text, btn);
-  }
+    navigator.clipboard.writeText(text).then(()=>flash(btn)).catch(()=>fallbackCopy(text,btn));
+  } else fallbackCopy(text,btn);
 }
 function fallbackCopy(text, btn){
   const ta = document.createElement('textarea');
   ta.value = text; ta.setAttribute('readonly','');
-  ta.style.position = 'fixed'; ta.style.top = '-1000px';
+  ta.style.position='fixed'; ta.style.top='-1000px';
   document.body.appendChild(ta); ta.select();
-  try { document.execCommand('copy'); flash(btn); } catch(e) { /* nothing to do */ }
+  try{ document.execCommand('copy'); flash(btn); }catch(e){ /* nothing to do */ }
   document.body.removeChild(ta);
 }
-document.addEventListener('click', (e) => {
+document.addEventListener('click',(e)=>{
   const btn = e.target.closest('button[data-copy],button[data-copy-text]');
   if(!btn) return;
   const literal = btn.getAttribute('data-copy-text');
@@ -305,68 +367,308 @@ document.addEventListener('click', (e) => {
   if(el) copy(el.textContent, btn);
 });
 
-/* the distance ruler ---------------------------------------------------- */
-// Log scale from one millionth of network difficulty up to a full block. A
-// linear bar would sit at zero forever and tell you nothing.
+/* ---------- ruler ---------- */
 const DECADES = 6;
 function buildRuler(){
   const plot = $('plot');
   for(let i = 0; i <= DECADES; i++){
     const tick = document.createElement('div');
     tick.className = 'tick';
-    // Setting .style from script is CSSOM, which the CSP allows; a style
-    // ATTRIBUTE in markup is what it blocks.
-    tick.style.left = ((i / DECADES) * 100) + '%';
+    tick.style.left = ((i/DECADES)*100) + '%';
     const label = document.createElement('i');
     const value = Math.pow(10, i - DECADES) * 100;
     label.textContent = i === DECADES ? 'BLOCK'
       : value >= 1 ? value + '%'
       : value.toFixed(Math.max(0, DECADES - i - 2)) + '%';
     tick.appendChild(label);
+    tick.dataset.pos = String((i / DECADES) * 100);
     plot.appendChild(tick);
   }
 }
-function positionOnRuler(fraction){
+// The marker carries its own label directly under the axis, so a tick label at
+// nearly the same position reads as a duplicate — most visibly at the far right,
+// where "BLOCK" would sit under "BLOCK" on the day it matters most.
+function hideCollidingTickLabels(pos){
+  document.querySelectorAll('#plot .tick').forEach((t) => {
+    const label = t.querySelector('i');
+    if(label) label.style.visibility = Math.abs(Number(t.dataset.pos) - pos) < 6 ? 'hidden' : 'visible';
+  });
+}
+function rulerPos(fraction){
   if(!(fraction > 0)) return 0;
-  const logPos = (Math.log10(fraction) + DECADES) / DECADES;
-  return Math.max(0, Math.min(1, logPos)) * 100;
+  return Math.max(0, Math.min(1, (Math.log10(fraction) + DECADES)/DECADES)) * 100;
 }
 
-/* sparkline ------------------------------------------------------------- */
+/* ---------- sparkline ---------- */
 function sparkline(history, windowMs){
-  const now = Date.now();
-  const buckets = 24;
-  const size = windowMs / buckets;
+  const now = Date.now(), buckets = 24, size = windowMs/buckets;
   const counts = new Array(buckets).fill(0);
   for(const at of history || []){
-    const idx = Math.floor((now - at) / size);
-    if(idx >= 0 && idx < buckets) counts[buckets - 1 - idx]++;
+    const idx = Math.floor((now - at)/size);
+    if(idx >= 0 && idx < buckets) counts[buckets-1-idx]++;
   }
   const peak = Math.max(1, ...counts);
   const recent = history && history.length ? (now - history[history.length-1]) < windowMs/4 : false;
   let html = '<div class="spark' + (recent ? '' : ' stale') + '">';
   for(const c of counts){
-    // Height classes only — inline style attributes are blocked by the CSP.
     const level = c === 0 ? 0 : Math.max(1, Math.round((c/peak)*10));
     html += '<i class="h' + level + (c ? ' fresh' : '') + '"></i>';
   }
   return html + '</div>';
 }
 
-/* render ---------------------------------------------------------------- */
-let sawData = false;
+/* ---------- SVG helpers ---------- */
+function el(name, attrs){
+  const node = document.createElementNS(SVG_NS, name);
+  for(const k in attrs) node.setAttribute(k, attrs[k]);
+  return node;
+}
+function clear(svg){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
 
+const W = 700, H = 180, PAD_L = 46, PAD_R = 8, PAD_T = 10, PAD_B = 22;
+
+function drawHashrateChart(samples, rangeSeconds, label){
+  const svg = $('hrChart');
+  clear(svg);
+  const now = Date.now()/1000;
+  const from = now - rangeSeconds;
+  const pts = (samples || []).filter(([ts]) => ts >= from);
+
+  if(pts.length < 2){
+    svg.appendChild(el('line',{x1:PAD_L,y1:H-PAD_B,x2:W-PAD_R,y2:H-PAD_B,class:'grid-line'}));
+    const t = el('text',{x:W/2,y:H/2,class:'axis-text','text-anchor':'middle'});
+    t.textContent = 'not enough history yet — a point is recorded every minute';
+    svg.appendChild(t);
+    $('hrChartNote').textContent = '';
+    return;
+  }
+
+  const max = Math.max(...pts.map(p => p[1])) || 1;
+  const top = max * 1.15;
+  const x = (ts) => PAD_L + ((ts - from)/rangeSeconds) * (W - PAD_L - PAD_R);
+  const y = (v) => H - PAD_B - (v/top) * (H - PAD_T - PAD_B);
+
+  // horizontal grid + y labels
+  for(let i = 0; i <= 3; i++){
+    const v = (top/3)*i;
+    const yy = y(v);
+    svg.appendChild(el('line',{x1:PAD_L,y1:yy,x2:W-PAD_R,y2:yy,class:'grid-line'}));
+    const hr = hashrate(v);
+    const t = el('text',{x:PAD_L-6,y:yy+3,class:'axis-text','text-anchor':'end'});
+    t.textContent = i === 0 ? '0' : hr.n + ' ' + hr.u;
+    svg.appendChild(t);
+  }
+
+  let d = '', area = '';
+  pts.forEach((p, i) => {
+    const px = x(p[0]).toFixed(1), py = y(p[1]).toFixed(1);
+    d += (i ? 'L' : 'M') + px + ',' + py;
+    area += (i ? 'L' : 'M' + px + ',' + (H-PAD_B) + 'L') + px + ',' + py;
+  });
+  area += 'L' + x(pts[pts.length-1][0]).toFixed(1) + ',' + (H-PAD_B) + 'Z';
+  svg.appendChild(el('path',{d:area,class:'series-area'}));
+  svg.appendChild(el('path',{d:d,class:'series'}));
+
+  // x labels
+  for(let i = 0; i <= 4; i++){
+    const ts = from + (rangeSeconds/4)*i;
+    const t = el('text',{x:x(ts),y:H-6,class:'axis-text','text-anchor': i===0?'start':(i===4?'end':'middle')});
+    const ago = (now - ts);
+    t.textContent = i === 4 ? 'now' : '-' + duration(ago);
+    svg.appendChild(t);
+  }
+
+  const avg = pts.reduce((s,p)=>s+p[1],0)/pts.length;
+  const a = hashrate(avg), m = hashrate(max);
+  $('hrChartNote').textContent =
+    pts.length + ' samples · average ' + a.n + ' ' + a.u + ' · peak ' + m.n + ' ' + m.u;
+}
+
+function drawShareChart(shareLog, networkDifficulty){
+  const svg = $('shareChart');
+  clear(svg);
+  const pts = shareLog || [];
+  if(pts.length < 2){
+    const t = el('text',{x:W/2,y:H/2,class:'axis-text','text-anchor':'middle'});
+    t.textContent = 'shares will appear here as they arrive';
+    svg.appendChild(t);
+    $('shareChartNote').textContent = '';
+    return;
+  }
+
+  const from = pts[0][0], to = Math.max(pts[pts.length-1][0], from + 1);
+  const target = networkDifficulty > 0 ? networkDifficulty : Math.max(...pts.map(p=>p[1])) * 10;
+  const loMax = Math.log10(Math.max(target, 1e-12));
+  // Keep the floor below the ceiling even when the network difficulty is lower
+  // than the shares themselves — which happens on regtest and on any chain
+  // whose difficulty falls under the vardiff floor. Without this the scale
+  // inverts and every point is drawn hundreds of pixels above the chart.
+  const rawMin = Math.max(1e-9, Math.min(...pts.map(p => p[1])));
+  const loMin = Math.min(Math.log10(rawMin), loMax - 0.5);
+  const span = Math.max(0.5, loMax - loMin);
+  const minD = Math.pow(10, loMin);
+
+  const x = (ts) => PAD_L + ((ts - from)/(to - from)) * (W - PAD_L - PAD_R);
+  // Clamped: nothing may be painted outside the box, whatever the data says.
+  const y = (v) => {
+    const raw = H - PAD_B - ((Math.log10(Math.max(v, minD)) - loMin)/span) * (H - PAD_T - PAD_B);
+    return Math.min(H - PAD_B, Math.max(PAD_T, raw));
+  };
+
+  // decade grid
+  for(let e = Math.ceil(loMin); e <= Math.floor(loMax); e++){
+    const yy = y(Math.pow(10, e));
+    if(yy < PAD_T || yy > H - PAD_B) continue;
+    svg.appendChild(el('line',{x1:PAD_L,y1:yy,x2:W-PAD_R,y2:yy,class:'grid-line'}));
+    const t = el('text',{x:PAD_L-6,y:yy+3,class:'axis-text','text-anchor':'end'});
+    t.textContent = compact(Math.pow(10, e));
+    svg.appendChild(t);
+  }
+
+  // the block line
+  const ty = y(target);
+  svg.appendChild(el('line',{x1:PAD_L,y1:ty,x2:W-PAD_R,y2:ty,class:'target-line'}));
+  const tl = el('text',{x:W-PAD_R,y:ty-5,class:'axis-text','text-anchor':'end'});
+  tl.textContent = 'block · ' + compact(target);
+  svg.appendChild(tl);
+
+  const bestVal = Math.max(...pts.map(p => p[1]));
+  for(const [ts, diff] of pts){
+    const isBest = diff === bestVal;
+    svg.appendChild(el('circle',{cx:x(ts).toFixed(1),cy:y(diff).toFixed(1),r:isBest?3.2:1.8,class:isBest?'dot best':'dot'}));
+  }
+
+  const t0 = el('text',{x:PAD_L,y:H-6,class:'axis-text','text-anchor':'start'});
+  t0.textContent = '-' + duration(Date.now()/1000 - from);
+  svg.appendChild(t0);
+  const t1 = el('text',{x:W-PAD_R,y:H-6,class:'axis-text','text-anchor':'end'});
+  t1.textContent = 'now';
+  svg.appendChild(t1);
+
+  $('shareChartNote').textContent =
+    pts.length + ' shares shown · best ' + compact(bestVal) +
+    (networkDifficulty ? ' · ' + percent(bestVal/networkDifficulty) + ' of a block' : '');
+}
+
+/* ---------- block alarm ---------- */
+// null, not 0: the server restores blocksFound from disk, so a browser that
+// started at zero would raise the alarm for a block found months ago on every
+// single page load — and never stop, because the title timer is never cleared.
+let knownBlocks = null;
+let alarmOn = false;
+let userGestured = false;
+for(const ev of ['pointerdown','keydown']){
+  document.addEventListener(ev, () => { userGestured = true; }, { once: true, passive: true });
+}
+let titleTimer = null;
+function clearAlarm(){
+  alarmOn = false;
+  document.body.classList.remove('block-found');
+  if(titleTimer){ clearInterval(titleTimer); titleTimer = null; }
+  document.title = 'Solo mining · Dogecoin';
+}
+document.addEventListener('click', (e) => {
+  if(e.target && e.target.id === 'dismissAlarm') clearAlarm();
+});
+
+function raiseAlarm(block){
+  if(alarmOn) return;
+  alarmOn = true;
+  document.body.classList.add('block-found');
+  // Title flashing works everywhere, including a background tab on plain http
+  // where the Notification API is unavailable.
+  let on = false;
+  titleTimer = setInterval(() => {
+    on = !on;
+    document.title = on ? '*** BLOCK FOUND ***' : 'Solo mining · Dogecoin';
+  }, 1200);
+  try{
+    if(window.Notification && Notification.permission === 'granted'){
+      new Notification('Dogecoin block found', { body: 'Height ' + block.height + ' — ' + (block.reward/1e8).toFixed(0) + ' DOGE' });
+    }
+  }catch(e){ /* not available over plain http; the page state is the fallback */ }
+  // Sound only if the page has had a user gesture. Browsers block audio before
+  // that and log a warning, and an alarm nobody can hear is not worth the noise.
+  if(userGestured){
+    try{
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [0, 0.18, 0.36].forEach((t, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.value = [523.25, 659.25, 783.99][i];
+        g.gain.value = 0.08;
+        o.connect(g); g.connect(ctx.destination);
+        o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.16);
+      });
+    }catch(e){ /* not available; the page state and title are the fallback */ }
+  }
+}
+
+/* ---------- probability ---------- */
+function blockProbability(hashrate, networkHashrate, seconds){
+  if(!(hashrate > 0) || !(networkHashrate > 0)) return 0;
+  // Poisson: blocks arrive at share-of-network x one block per minute.
+  const expected = (hashrate/networkHashrate) * (seconds/60);
+  return 1 - Math.exp(-expected);
+}
+function oddsText(p){
+  if(p <= 0) return '—';
+  if(p >= 0.999) return 'practically certain';
+  const pct = p*100;
+  const one = 1/p;
+  // Plain decimals as far down as it stays readable; scientific notation is
+  // correct but nobody parses "4.2e-3%" at a glance.
+  const pctText = pct >= 1 ? pct.toFixed(1)
+    : pct >= 0.01 ? pct.toFixed(3)
+    : pct >= 0.0001 ? pct.toFixed(5)
+    : pct.toExponential(1);
+  return pctText + '%  ·  1 in ' + compact(one);
+}
+
+/* ---------- state ---------- */
+let chartRange = '24h';
+// Start with an empty history rather than null, so the charts paint their
+// placeholders on the very first frame instead of leaving two empty boxes
+// until /api/history returns — or forever, if it never does.
+let history = { minuteSamples: [], hourSamples: [], shareLog: [], workers: {} };
+let lastStatus = null;
+// Held separately: tick() runs six times more often than refreshHistory(), and
+// would otherwise blank this warning four seconds out of every thirty.
+let persistenceWarning = null;
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-range]');
+  if(!btn) return;
+  chartRange = btn.getAttribute('data-range');
+  document.querySelectorAll('button[data-range]').forEach((b) => {
+    b.classList.toggle('on', b.getAttribute('data-range') === chartRange);
+  });
+  renderCharts();
+});
+
+function renderCharts(){
+  const map = {
+    '1h':  [3600,        history.minuteSamples, 'last hour'],
+    '24h': [86400,       history.minuteSamples, 'last 24 hours'],
+    '30d': [30*86400,    history.hourSamples,   'last 30 days'],
+  };
+  const [seconds, samples, label] = map[chartRange] || map['24h'];
+  $('hrChartTitle').textContent = label;
+  drawHashrateChart(samples, seconds, label);
+  drawShareChart(history.shareLog, lastStatus ? lastStatus.networkDifficulty : null);
+}
+
+/* ---------- main refresh ---------- */
 async function tick(){
   let d;
-  try {
+  try{
     const res = await fetch('/api/status', {cache:'no-store'});
     d = await res.json();
-  } catch (e) {
+  }catch(e){
     $('beacon').className = 'beacon off';
     $('mastMeta').textContent = 'dashboard unreachable';
     return;
   }
-
+  lastStatus = d;
   const notice = $('notice');
 
   if(!d.ok){
@@ -376,7 +678,24 @@ async function tick(){
     notice.textContent = d.error || 'The stratum server has not started.';
     return;
   }
-  sawData = true;
+
+  // block alarm — only for a block found while this page was open, and only if
+  // it is actually recent.
+  const RECENT_MS = 30 * 60 * 1000;
+  if(knownBlocks === null){
+    knownBlocks = d.blocksFound;
+  } else if(d.blocksFound > knownBlocks && d.blocks.length){
+    const b = d.blocks.find((x) => x.status === 'accepted') || d.blocks[0];
+    if(Date.now() - b.at < RECENT_MS){
+    $('jackpotText').innerHTML =
+      'Height <span class="num">' + b.height + '</span>, worth <span class="num">' +
+      (b.reward/1e8).toLocaleString('en-US',{maximumFractionDigits:2}) + ' DOGE</span>, found by ' +
+      esc(b.worker) + ' and paid to <span class="num">' + esc(b.address) + '</span>. ' +
+      'The node accepted it, so it is on the chain.';
+      raiseAlarm(b);
+    }
+  }
+  knownBlocks = d.blocksFound;
 
   if(d.templateError){
     notice.className = 'notice show bad';
@@ -387,46 +706,54 @@ async function tick(){
   } else if(!d.workers.length){
     notice.className = 'notice show';
     notice.textContent = 'No miners connected. Point one at the stratum URL below; it will appear here within a few seconds.';
+  } else if(persistenceWarning){
+    notice.className = 'notice show';
+    notice.textContent = persistenceWarning;
   } else {
     notice.className = 'notice';
   }
 
   $('beacon').className = 'beacon ' + (d.templateError ? 'off' : 'on');
+  const since0 = d.firstStartedAt || d.startedAt;
   $('mastMeta').textContent =
     (d.chain === 'main' ? 'dogecoin mainnet' : d.chain) +
     ' · height ' + (d.height != null ? d.height.toLocaleString('en-US') : '—') +
-    ' · up ' + duration((Date.now() - d.startedAt)/1000);
+    ' · mining for ' + duration((Date.now() - since0)/1000);
 
+  // hero
   const hr = hashrate(d.totalHashrate);
-  $('hr').textContent = hr.n;
-  $('hrUnit').textContent = hr.u;
+  $('hr').textContent = hr.n; $('hrUnit').textContent = hr.u;
 
-  const netHash = d.networkDifficulty ? (d.networkDifficulty * Math.pow(2,32)) / 60 : 0;
-  const shareOfNetwork = netHash > 0 ? d.totalHashrate / netHash : 0;
-  const networkShare = shareOfNetwork >= 1
-    ? 'more hashrate than the whole network'
-    : shareOfNetwork > 0 ? '1 in ' + compact(1/shareOfNetwork) + ' of the network' : '';
-  $('hrAside').textContent = d.workers.length
+  const diffForOdds = d.smoothedDifficulty || d.networkDifficulty;
+  const netHash = diffForOdds ? (diffForOdds * Math.pow(2,32))/60 : 0;
+  const shareOfNetwork = netHash > 0 ? d.totalHashrate/netHash : 0;
+  $('hrSub').textContent = d.workers.length
     ? d.workers.length + (d.workers.length === 1 ? ' worker' : ' workers') +
-      (networkShare ? ' · ' + networkShare : '')
+      (shareOfNetwork > 0 ? ' · 1 in ' + compact(1/shareOfNetwork) + ' of the network' : '')
     : 'nothing connected';
 
-  // distance ruler
   const best = d.bestShareDiff || 0;
-  const fraction = d.networkDifficulty > 0 ? best / d.networkDifficulty : 0;
-  const pos = positionOnRuler(fraction);
+  const fraction = d.networkDifficulty > 0 ? best/d.networkDifficulty : 0;
+  $('best').textContent = compact(best);
+  $('bestPct').textContent = fraction > 0 ? (fraction >= 1 ? 'BLOCK' : 'of ' + compact(d.networkDifficulty)) : '';
+  $('bestSub').textContent = best
+    ? percent(fraction) + ' of a block' + (d.bestShareAt ? ' · ' + since(d.bestShareAt) + ' ago' : '')
+    : 'no shares yet';
+
+  // ruler
+  const pos = rulerPos(fraction);
   $('rulerFill').style.width = pos + '%';
   $('rulerYou').style.left = pos + '%';
   $('rulerLabel').textContent = fraction >= 1 ? 'BLOCK' : fraction > 0 ? percent(fraction) : '';
+  hideCollidingTickLabels(fraction > 0 ? pos : -100);
   $('verdict').innerHTML = best
     ? 'best share <b>' + compact(best) + '</b> of ' + compact(d.networkDifficulty) + ' needed'
     : 'no shares yet';
   $('scaleFoot').textContent = !best
     ? 'Once your miners submit shares, this ruler shows how close the best one came to the difficulty a real block needs. The scale is logarithmic — each mark is ten times harder than the one before it.'
     : fraction >= 1
-      ? 'A share has met the full network difficulty, which means a block. Check the blocks table below for whether the node accepted it.'
-      : 'Your closest share so far reached ' + percent(fraction) + ' of the difficulty a block requires. ' +
-        'It is a near miss, not progress: every new share starts the lottery from scratch.';
+      ? 'A share met the full network difficulty, which means a block. The blocks table below says whether the node accepted it.'
+      : 'Your closest share so far reached ' + percent(fraction) + ' of the difficulty a block requires. It is a near miss, not progress: every new share starts the lottery from scratch.';
 
   // figures
   $('fWorkers').textContent = d.workers.length;
@@ -434,33 +761,72 @@ async function tick(){
   $('fWorkersSub').textContent = stale ? stale + ' with no recent share' : (d.workers.length ? 'all submitting' : '—');
 
   $('fShares').textContent = compact(d.accepted);
-  const rejectRate = d.accepted + d.rejected > 0 ? (100 * d.rejected) / (d.accepted + d.rejected) : 0;
-  $('fShares').className = 'v' + (rejectRate > 5 ? ' warnc' : '');
+  const total = d.accepted + d.rejected;
+  const rejectRate = total > 0 ? (100*d.rejected)/total : 0;
+  $('fShares').className = 'v' + (rejectRate > 10 ? ' badc' : rejectRate > 5 ? ' warnc' : '');
+  // Never round a real rejection rate down to "0.0%" — six rejects in forty
+  // thousand shares is 0.015%, and printing 0.0% hides whether it is zero.
+  const rateText = rejectRate === 0 ? '0%'
+    : rejectRate >= 1 ? rejectRate.toFixed(1) + '%'
+    : rejectRate >= 0.01 ? rejectRate.toFixed(2) + '%'
+    : '<0.01%';
   $('fSharesSub').textContent = d.rejected
-    ? d.rejected + ' rejected (' + rejectRate.toFixed(1) + '%)'
+    ? d.rejected + ' rejected (' + rateText + ')'
     : 'none rejected';
 
   $('fBlocks').textContent = d.blocksFound;
-  $('fBlocks').className = 'v' + (d.blocksFound ? ' good' : '');
+  $('fBlocks').className = 'v' + (d.blocksFound ? ' gold' : '');
   $('fBlocksSub').textContent = d.blocks.length ? 'last ' + since(d.blocks[0].at) + ' ago' : 'none yet';
 
-  $('fEta').textContent = (d.totalHashrate > 0 && netHash > 0) ? duration((60 * netHash) / d.totalHashrate) : '—';
+  const eta = (d.totalHashrate > 0 && netHash > 0) ? (60*netHash)/d.totalHashrate : 0;
+  $('fEta').textContent = eta ? duration(eta) : '—';
+
+  // odds
+  $('pDay').textContent = oddsText(blockProbability(d.totalHashrate, netHash, 86400));
+  $('pMonth').textContent = oddsText(blockProbability(d.totalHashrate, netHash, 2629800));
+  $('pYear').textContent = oddsText(blockProbability(d.totalHashrate, netHash, 31557600));
+  $('pTen').textContent = oddsText(blockProbability(d.totalHashrate, netHash, 315576000));
+  $('oddsAside').textContent = 'at ' + hr.n + ' ' + hr.u + ' against ' + compact(diffForOdds) + ' difficulty';
+
+  // network
+  $('nHeight').textContent = d.height != null ? d.height.toLocaleString('en-US') : '—';
+  $('nDiff').textContent = compact(d.networkDifficulty);
+  if(d.smoothedDifficulty){
+    const delta = d.networkDifficulty/d.smoothedDifficulty - 1;
+    const arrow = delta > 0.02 ? '↑' : delta < -0.02 ? '↓' : '→';
+    $('nDiffAvg').innerHTML = compact(d.smoothedDifficulty) +
+      ' <span class="trend">' + arrow + ' ' + (delta >= 0 ? '+' : '') + (delta*100).toFixed(1) + '% now</span>';
+  } else {
+    $('nDiffAvg').textContent = '—';
+  }
+  const nh = hashrate(netHash);
+  $('nHash').textContent = nh.n + ' ' + nh.u;
+  $('nShare').textContent = shareOfNetwork >= 1 ? 'above 100%'
+    : shareOfNetwork > 0 ? '1 in ' + compact(1/shareOfNetwork) : '—';
+  $('nReward').textContent = d.coinbaseValue != null
+    ? (d.coinbaseValue/1e8).toLocaleString('en-US',{maximumFractionDigits:2}) + ' DOGE' : '—';
+  $('nPing').textContent = d.nodeLatencyMs != null ? d.nodeLatencyMs + ' ms' : '—';
+  $('nTemplate').textContent = d.templateAgeMs != null ? Math.round(d.templateAgeMs/1000) + 's' : '—';
+  $('diffNote').textContent =
+    'Dogecoin retargets difficulty on every block, damped to an eighth of the deviation, so the instantaneous figure swings by tens of percent within minutes. The odds above use the recent average instead, which is the honest basis for a long-run estimate.';
 
   // workers
   if(!d.workers.length){
     $('workers').innerHTML = '<p class="empty">Nothing connected yet.</p>';
   } else {
     let h = '<table><thead><tr><th>Worker</th><th>Activity</th><th class="r">Hashrate</th>' +
-            '<th class="r hide">Difficulty</th><th class="r hide">Shares</th><th class="r">Last</th></tr></thead><tbody>';
+            '<th class="r hide">Difficulty</th><th class="r hide">Ping</th><th class="r hide">Shares</th><th class="r">Last</th></tr></thead><tbody>';
     for(const w of d.workers){
       const wh = hashrate(w.hashrate);
       const idle = !w.lastShareAt || Date.now() - w.lastShareAt > 300000;
+      const ping = w.latencyMs == null ? '<span class="unit">—</span>'
+        : (w.latencyMs > 500 ? '<span class="tag warn">' + w.latencyMs + ' ms</span>' : w.latencyMs + ' <span class="unit">ms</span>');
       h += '<tr>' +
-        '<td><div class="wname">' + esc(w.worker) + '</div>' +
-          '<div class="wsub">' + esc(w.userAgent || w.remote || '') + '</div></td>' +
-        '<td>' + sparkline(w.shareHistory, 10 * 60 * 1000) + '</td>' +
+        '<td><div class="wname">' + esc(w.worker) + '</div><div class="wsub">' + esc(w.userAgent || w.remote || '') + '</div></td>' +
+        '<td>' + sparkline(w.shareHistory, 10*60*1000) + '</td>' +
         '<td class="num r">' + wh.n + ' <span class="unit">' + wh.u + '</span></td>' +
         '<td class="num r hide">' + compact(w.difficulty) + '</td>' +
+        '<td class="num r hide">' + ping + '</td>' +
         '<td class="num r hide">' + w.accepted + (w.rejected ? ' <span class="tag bad">' + w.rejected + '</span>' : '') + '</td>' +
         '<td class="num r">' + (idle ? '<span class="tag bad">' + since(w.lastShareAt) + '</span>' : since(w.lastShareAt)) + '</td>' +
       '</tr>';
@@ -468,47 +834,35 @@ async function tick(){
     $('workers').innerHTML = h + '</tbody></table>';
   }
 
-  // connection
   $('cUrl').textContent = 'stratum+tcp://' + location.hostname + ':' + d.stratumPort;
   $('cUser').textContent = d.payoutAddress || '(no address configured)';
 
-  // network
-  $('nHeight').textContent = d.height != null ? d.height.toLocaleString('en-US') : '—';
-  $('nDiff').textContent = d.networkDifficulty ? compact(d.networkDifficulty) : '—';
-  const nh = hashrate(netHash);
-  $('nHash').textContent = nh.n + ' ' + nh.u;
-  $('nShare').textContent = shareOfNetwork >= 1 ? 'above 100%'
-    : shareOfNetwork > 0 ? '1 in ' + compact(1/shareOfNetwork) : '—';
-  $('nReward').textContent = d.coinbaseValue != null
-    ? (d.coinbaseValue/1e8).toLocaleString('en-US', {maximumFractionDigits:2}) + ' DOGE' : '—';
-  $('nTemplate').textContent = d.templateAgeMs != null ? Math.round(d.templateAgeMs/1000) + 's' : '—';
-
   // blocks
+  const TAGS = {
+    accepted:'<span class="tag good">accepted</span>',
+    stale:'<span class="tag">orphaned</span>',
+    rejected:'<span class="tag bad">rejected</span>',
+    error:'<span class="tag bad">not submitted</span>',
+    submitting:'<span class="tag">submitting</span>',
+  };
   if(!d.blocks.length){
     $('blocks').innerHTML = '<p class="empty">No blocks yet. At solo difficulty that is the expected state for a long time — the expected wait above is the honest number, and it is an average, not a countdown.</p>';
   } else {
-    const TAGS = {
-      accepted: '<span class="tag good">accepted</span>',
-      stale: '<span class="tag">orphaned</span>',
-      rejected: '<span class="tag bad">rejected</span>',
-      error: '<span class="tag bad">not submitted</span>',
-      submitting: '<span class="tag">submitting</span>',
-    };
     const SHOWN = 12;
     let h = '<table><thead><tr><th>Height</th><th>Status</th><th class="hide">Worker</th>' +
             '<th class="r">Reward</th><th class="r">When</th></tr></thead><tbody>';
     for(const b of d.blocks.slice(0, SHOWN)){
+      // hasOwnProperty, not a bare lookup: `status: "constructor"` would
+      // otherwise render the source of Object into the page.
+      const tag = Object.prototype.hasOwnProperty.call(TAGS, b.status) ? TAGS[b.status] : TAGS.submitting;
       h += '<tr><td class="num">' + b.height + '</td>' +
-        '<td>' + (TAGS[b.status] || TAGS.submitting) +
-          (b.error ? '<div class="wsub">' + esc(b.error) + '</div>' : '') + '</td>' +
+        '<td>' + tag + (b.error ? '<div class="wsub">' + esc(b.error) + '</div>' : '') + '</td>' +
         '<td class="hide"><div class="wname">' + esc(b.worker) + '</div></td>' +
         '<td class="num r">' + (b.reward/1e8).toFixed(2) + '</td>' +
         '<td class="num r">' + since(b.at) + '</td></tr>';
     }
     h += '</tbody></table>';
-    if(d.blocks.length > SHOWN){
-      h += '<p class="empty">Showing the ' + SHOWN + ' most recent of ' + d.blocks.length + '.</p>';
-    }
+    if(d.blocks.length > SHOWN) h += '<p class="empty">Showing the ' + SHOWN + ' most recent of ' + d.blocks.length + '.</p>';
     $('blocks').innerHTML = h;
   }
 
@@ -518,10 +872,70 @@ async function tick(){
     : 'No shares have been rejected.';
 }
 
+/* ---------- history refresh ---------- */
+async function refreshHistory(){
+  try{
+    const res = await fetch('/api/history', {cache:'no-store'});
+    const fresh = await res.json();
+    if(fresh && typeof fresh === 'object') history = fresh;
+  }catch(e){
+    $('hrChartNote').textContent = 'history unavailable';
+    return;
+  }
+
+  // How much work has been done, measured in blocks' worth.
+  //
+  // The obvious "luck = shares found / shares expected" is circular: the
+  // hashrate it would compare against is itself derived from those same shares,
+  // so it always lands near 100% and says nothing. This instead sums the actual
+  // accepted work — lifetime, per worker, uncapped — and expresses it as a
+  // fraction of the work one block takes. That number really does grow, and it
+  // is the honest denominator for luck once a block has been found.
+  if(lastStatus && history.workers){
+    const workUnits = Object.values(history.workers).reduce((s, w) => s + (w.work || 0), 0);
+    const hashes = workUnits * 65536;
+    const diff = lastStatus.smoothedDifficulty || lastStatus.networkDifficulty;
+    const perBlock = diff > 0 ? diff * Math.pow(2, 32) : 0;
+    const blocksWorth = perBlock > 0 ? hashes / perBlock : 0;
+
+    if(blocksWorth > 0){
+      $('fLuck').textContent = blocksWorth >= 0.01 ? blocksWorth.toFixed(2) : blocksWorth.toExponential(1);
+      const found = lastStatus.blocksFound || 0;
+      if(found > 0){
+        const luck = (found / blocksWorth) * 100;
+        // Same laddering as the odds table: a luck figure below 1% must not
+        // print as a flat "0%".
+        const luckText = luck >= 10 ? luck.toFixed(0)
+          : luck >= 1 ? luck.toFixed(1)
+          : luck >= 0.01 ? luck.toFixed(2)
+          : luck.toExponential(1);
+        $('fLuck').className = 'v' + (luck >= 100 ? ' good' : '');
+        $('fLuckSub').textContent = found + ' block' + (found === 1 ? '' : 's') +
+          ' found, ' + luckText + '% luck';
+      } else {
+        $('fLuck').className = 'v';
+        $('fLuckSub').textContent = "blocks' worth of work, none found yet";
+      }
+    } else {
+      $('fLuck').textContent = '—';
+      $('fLuckSub').textContent = 'measured against one block';
+    }
+  }
+
+  persistenceWarning = history.persistent === false
+    ? 'Statistics are not being saved (' + (history.storeError || 'no writable path') +
+      '), so this history will reset when the app restarts.'
+    : null;
+  $('chartAside').textContent = history && history.persistent ? 'kept across restarts' : '';
+  renderCharts();
+}
+
 buildRuler();
 tick();
+refreshHistory();
 setInterval(tick, 5000);
-document.addEventListener('visibilitychange', () => { if(!document.hidden) tick(); });
+setInterval(refreshHistory, 30000);
+document.addEventListener('visibilitychange', () => { if(!document.hidden){ tick(); refreshHistory(); } });
 </script>
 </body>
 </html>

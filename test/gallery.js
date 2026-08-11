@@ -33,6 +33,9 @@ const SCENES = {
     payoutAddress: 'DHh2vimDCkdpZqMRVtcr8CLWPZeXYBVYcL',
     startedAt: minutes(60 * 71), height: 6327333,
     networkDifficulty: NETWORK_DIFFICULTY, coinbaseValue: 1000415111991,
+    // DigiShield retargets every block, so the panel shows a smoothed average
+    // next to the instantaneous figure; both are part of the real payload.
+    smoothedDifficulty: NETWORK_DIFFICULTY * 0.97, difficultySamples: 240, nodeLatencyMs: 3,
     templateAgeMs: 3400, templateError: null,
     accepted: 41207, rejected: 6, rejectReasons: { 'stale job': 6 },
     bestShareDiff: 3187442, bestShareAt: minutes(1400),
@@ -75,6 +78,66 @@ SCENES.empty.rejectReasons = {};
 SCENES.empty.bestShareDiff = 0;
 SCENES.empty.startedAt = minutes(2);
 
+// The dashboard draws its charts and its "work done" figure from /api/history,
+// not from /api/status. Leaving that endpoint live would mix regtest history
+// into a mainnet screenshot, so the history is synthesised to match the scene.
+// Deterministic uniforms — Math.random() would make the gallery images differ
+// on every run, and a plain sine makes the charts look like a test pattern.
+function rng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function makeHistory(scene) {
+  const nowSec = Math.round(now / 1000);
+  const total = scene.totalHashrate;
+  const r = rng(20260809);
+  const minuteSamples = [];
+  for (let i = 24 * 60; i >= 0; i--) {
+    // A steady farm measured over a short window: the estimate wanders a few
+    // percent because shares arrive at random, not because the miners change.
+    minuteSamples.push([nowSec - i * 60, Math.round(total * (0.9 + r() * 0.2))]);
+  }
+  const hourSamples = [];
+  for (let i = 30 * 24; i >= 0; i--) {
+    // Averaged over an hour the same noise is much smaller.
+    hourSamples.push([
+      Math.floor((nowSec - i * 3600) / 3600) * 3600,
+      Math.round(total * (0.975 + r() * 0.05)),
+      60,
+    ]);
+  }
+  const shareLog = [];
+  for (let i = 600; i > 0 && scene.workers.length; i--) {
+    const d = i % 3 === 0 ? 2048 : 16384;
+    // A share's difficulty is exponentially distributed with mean d.
+    const found = d * -Math.log(1 - r());
+    shareLog.push([nowSec - i * 14, Math.round(found), d]);
+  }
+  const workers = {};
+  for (const w of scene.workers) {
+    // work is counted in stratum difficulty units; one unit is 2^16 hashes.
+    workers[w.worker] = {
+      accepted: w.accepted, rejected: w.rejected, bestShareDiff: w.bestShareDiff,
+      firstSeen: w.connectedAt, lastSeen: w.lastShareAt,
+      work: Math.round((w.hashrate * ((now - w.connectedAt) / 1000)) / 65536),
+    };
+  }
+  return {
+    ok: true, persistent: true, storeError: null, firstStartedAt: scene.startedAt,
+    minuteSamples: scene.workers.length ? minuteSamples : [],
+    hourSamples: scene.workers.length ? hourSamples : [],
+    shareLog, workers,
+    lifetime: {
+      accepted: scene.accepted, rejected: scene.rejected, rejectReasons: scene.rejectReasons,
+      blocksFound: scene.blocksFound, bestShareDiff: scene.bestShareDiff, bestShareAt: scene.bestShareAt,
+    },
+  };
+}
+
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
   const browser = await chromium.launch();
@@ -97,6 +160,13 @@ SCENES.empty.startedAt = minutes(2);
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(SCENES[shot.scene]),
+      })
+    );
+    await page.route('**/api/history', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(makeHistory(SCENES[shot.scene])),
       })
     );
     await page.goto(BASE + '/', { waitUntil: 'networkidle' });

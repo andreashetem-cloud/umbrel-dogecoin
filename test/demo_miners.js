@@ -64,6 +64,12 @@ class SimMiner {
         this.extranonce1 = Buffer.from(m.result[1], 'hex');
         continue;
       }
+      if (m.method === 'client.get_version') {
+        // Real cgminer-derived firmware answers this; it is how the server
+        // measures round-trip time.
+        this.socket.write(JSON.stringify({ id: m.id, result: 'demo-miner/1.0', error: null }) + '\n');
+        continue;
+      }
       if (m.method === 'mining.set_difficulty') {
         this.difficulty = m.params[0];
       } else if (m.method === 'mining.notify') {

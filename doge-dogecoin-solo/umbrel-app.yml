@@ -2,7 +2,7 @@ manifestVersion: 1
 id: doge-dogecoin-solo
 category: bitcoin
 name: Dogecoin Solo Mining
-version: "1.0.0"
+version: "1.1.0"
 tagline: Point your scrypt miners at your own Dogecoin node
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -52,6 +52,12 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  Statistics now survive a restart: shares, best share, hashrate history and blocks found are kept on
+  disk instead of only in memory. Adds hashrate charts over hours and months, the odds of a block over
+  a day, month and year, a luck figure comparing shares found against shares expected, round-trip
+  latency to each miner and to your node, and an unmistakable state when a block is found.
+
+
   First release. Stratum v1 with per-worker variable difficulty, block templates over getblocktemplate
   longpoll for instant new-block switching, per-worker payout addresses, and a dashboard showing
   hashrate, best share and expected time to a block. Block construction is verified against a real

@@ -30,15 +30,19 @@ const DEFAULT_LIMITS = {
   maxPayoutVariants: 16,
   minLongpollIntervalMs: 250,
   handshakeTimeoutMs: 30000,
+  pingIntervalMs: 60000,
   difficultyGraceMs: 60000,
   lockPayoutAddress: false,
 };
 
 class Pool extends EventEmitter {
-  constructor(config) {
+  constructor(config, store = null) {
     super();
     this.config = { ...DEFAULT_LIMITS, ...config };
     config = this.config;
+    // Optional durable history. Everything below works without it; the pool
+    // simply forgets on restart.
+    this.store = store;
     this.rpc = new RpcClient(config.rpc);
     // A second client for longpoll: those requests block for up to a minute and
     // must not sit in front of an urgent submitblock.
@@ -55,6 +59,9 @@ class Pool extends EventEmitter {
     this.clients = new Map();
     this.clientCounter = 0;
     this.extranonceCounter = crypto.randomBytes(4).readUInt32BE(0);
+    this.pingCounter = 0;
+    this.nodeLatency = [];
+    this.difficultyHistory = [];
 
     this.chain = 'main';
     this.payoutScript = null;
@@ -72,6 +79,20 @@ class Pool extends EventEmitter {
       blocks: [],
       templateError: null,
     };
+
+    // Seed the live counters from the durable history, so the dashboard shows
+    // a continuous story across restarts rather than starting from zero.
+    if (this.store) {
+      const s = this.store.state;
+      this.stats.accepted = s.accepted;
+      this.stats.rejected = s.rejected;
+      this.stats.rejectReasons = { ...s.rejectReasons };
+      this.stats.blocksFound = this.store.blocksFound();
+      this.stats.blocks = s.blocks.slice();
+      this.stats.bestShareDiff = s.bestShareDiff;
+      this.stats.bestShareAt = s.bestShareAt;
+      this.stats.firstStartedAt = s.firstStartedAt;
+    }
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -99,6 +120,7 @@ class Pool extends EventEmitter {
     this.stopped = false;
 
     await this.refreshTemplate('startup');
+    await this.reconcileBlocks();
 
     // Bind the socket BEFORE arming any background work, so a port clash
     // cannot leave timers running behind a failed start.
@@ -125,6 +147,34 @@ class Pool extends EventEmitter {
     this.server.on('error', (err) => this.emitSafely('error', err));
 
     this.started = true;
+
+    // Sample the combined hashrate once a minute. This is what the dashboard's
+    // history charts are drawn from, and it is the only way to see that a
+    // miner dropped out at three in the morning.
+    this.sampleTimer = setInterval(() => {
+      if (!this.store) return;
+      let total = 0;
+      for (const c of this.clients.values()) {
+        if (c.authorized) total += this.clientHashrate(c);
+      }
+      this.store.recordSample(Date.now(), total);
+    }, 60000);
+    this.sampleTimer.unref();
+
+    // Every five minutes, not every thirty seconds: the whole file is rewritten
+    // each time, and at 30s that is hundreds of megabytes of writes per day for
+    // history nobody loses anyway — a block, a clean shutdown and a crash all
+    // force an immediate save.
+    this.saveTimer = setInterval(() => {
+      if (this.store) this.store.save();
+    }, 300000);
+    this.saveTimer.unref();
+
+    this.pingTimer = setInterval(() => {
+      for (const c of this.clients.values()) this.pingClient(c);
+    }, this.config.pingIntervalMs);
+    this.pingTimer.unref();
+
     this.pollTimer = setInterval(
       () => this.refreshTemplate('poll').catch(() => {}),
       this.config.pollIntervalMs
@@ -133,9 +183,65 @@ class Pool extends EventEmitter {
     this.log(`stratum listening on 0.0.0.0:${this.config.stratumPort}`);
   }
 
+  // Ask the node about every block we recorded but never resolved.
+  //
+  // A crash, a power cut or a kill during the submit-retry window leaves a
+  // record stuck at "submitting", and a submission that exhausted its retries
+  // can still end up on the chain via a peer. Without this, blocksFound — which
+  // is derived from these records — undercounts a block you actually mined,
+  // permanently and silently.
+  async reconcileBlocks() {
+    if (!this.store) return;
+    const unresolved = this.store.state.blocks.filter(
+      (b) => b && b.hash && b.accepted !== true
+    );
+    if (!unresolved.length) return;
+
+    let resolved = 0;
+    for (const b of unresolved) {
+      try {
+        const block = await this.rpc.call('getblock', [b.hash]);
+        // confirmations is -1 for a block the node knows but that is not on the
+        // main chain, which is exactly the orphaned case.
+        if (block && block.confirmations >= 1) {
+          this.store.updateBlock(b.hash, { status: 'accepted', accepted: true, error: null });
+          resolved++;
+          this.log(`block ${b.height} was on the chain after all — ${b.hash}`);
+        } else if (b.status === 'submitting') {
+          this.store.updateBlock(b.hash, {
+            status: 'stale',
+            accepted: false,
+            error: 'valid, but another block reached this height first',
+          });
+        }
+      } catch {
+        // The node does not have it. If we never finished submitting, say so
+        // honestly rather than leaving it as "submitting" forever.
+        if (b.status === 'submitting') {
+          this.store.updateBlock(b.hash, {
+            status: 'error',
+            accepted: false,
+            error: 'submission was interrupted; the node does not have this block',
+          });
+        }
+      }
+    }
+
+    this.store.save(true);
+    this.stats.blocks = this.store.state.blocks.slice();
+    this.stats.blocksFound = this.store.blocksFound();
+    if (resolved) this.log(`reconciled ${resolved} block(s) against the node at startup`);
+  }
+
   stop() {
     clearInterval(this.pollTimer);
+    clearInterval(this.sampleTimer);
+    clearInterval(this.saveTimer);
+    clearInterval(this.pingTimer);
     this.pollTimer = null;
+    // Force a final write: an update or a reboot must not cost the last half
+    // minute of history.
+    if (this.store) this.store.save(true);
     // Ends the longpoll loop; without it an abandoned instance keeps polling
     // the node forever.
     this.stopped = true;
@@ -147,9 +253,104 @@ class Pool extends EventEmitter {
     }
   }
 
+  // Stop taking new work, without tearing anything down yet.
+  //
+  // Order matters at shutdown. Draining while the stratum port is still open
+  // means miners keep submitting, the counter never reaches zero, and the drain
+  // burns its whole timeout for nothing — after which every share that finishes
+  // a moment later is thrown away.
+  beginShutdown() {
+    this.draining = true;
+    if (this.server) {
+      try { this.server.close(); } catch { /* already closed */ }
+    }
+  }
+
+  // Resolves once nothing is in progress, or after `timeoutMs`.
+  //
+  // This counts BLOCK SUBMISSIONS as well as share validation. Submission is
+  // the slow one — six attempts with backoff, up to about two minutes — and it
+  // is the only thing here whose loss actually costs money. Exiting while a
+  // submitblock retry is pending means the block never reaches the chain.
+  async drain(timeoutMs = 130000) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pending() > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return this.pending() === 0;
+  }
+
+  pending() {
+    return (this.inFlight || 0) + (this.inFlightBlocks || 0);
+  }
+
   // Node throws when an 'error' event has no listener. That is a sensible
   // default for application code and a terrible one for a background service,
   // so errors are logged when nobody is listening rather than fatal.
+  recordNodeLatency(ms) {
+    if (!this.nodeLatency) this.nodeLatency = [];
+    this.nodeLatency.push(ms);
+    if (this.nodeLatency.length > 20) this.nodeLatency.shift();
+  }
+
+  medianNodeLatency() {
+    if (!this.nodeLatency || !this.nodeLatency.length) return null;
+    const sorted = [...this.nodeLatency].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  // Round-trip time to a miner. Stratum v1 has no ping, but `client.get_version`
+  // is a server-to-client request that firmware answers, which makes it the
+  // only honest way to measure the link. Miners that ignore it simply report no
+  // latency rather than a made-up number.
+  pingClient(client) {
+    if (!client.authorized || client.socket.destroyed) return;
+    // Random, not sequential: a predictable id lets a client answer a ping it
+    // was never sent and report whatever latency flatters it.
+    const id = `ping-${crypto.randomBytes(8).toString('hex')}`;
+    client.pendingPing = { id, sentAt: Date.now() };
+    this.send(client, { id, method: 'client.get_version', params: [] });
+    // If the miner never answers, stop claiming we are waiting.
+    setTimeout(() => {
+      if (client.pendingPing && client.pendingPing.id === id) {
+        client.pendingPing = null;
+        // Clear it. Showing the last good round-trip for a link that has since
+        // gone quiet hides the very condition this number exists to surface.
+        client.latencyMs = null;
+      }
+    }, 15000).unref();
+  }
+
+  // Smoothed network difficulty. Dogecoin retargets EVERY block (DigiShield,
+  // damped by 1/8), so the instantaneous value swings by tens of percent within
+  // minutes. Deriving "expected wait" from a single sample makes that number
+  // jump around for no real reason.
+  recordNetworkDifficulty(difficulty, prevHash) {
+    if (!(difficulty > 0)) return;
+    if (!this.difficultyHistory) this.difficultyHistory = [];
+    // De-duplicate by tip hash. A reorg swaps the tip back and forth, and
+    // without this the same height is sampled twice and skews the mean.
+    if (prevHash && this.difficultySeen && this.difficultySeen.has(prevHash)) return;
+    if (prevHash) {
+      if (!this.difficultySeen) this.difficultySeen = new Set();
+      this.difficultySeen.add(prevHash);
+      if (this.difficultySeen.size > 200) {
+        this.difficultySeen.delete(this.difficultySeen.values().next().value);
+      }
+    }
+    this.difficultyHistory.push(difficulty);
+    if (this.difficultyHistory.length > 60) this.difficultyHistory.shift();
+  }
+
+  // Null until there is enough history to be worth calling an average. The
+  // dashboard falls back to the instantaneous value, which is honest; claiming
+  // a "recent average" built from one sample is not.
+  smoothedDifficulty() {
+    const h = this.difficultyHistory;
+    if (!h || h.length < 10) return null;
+    return h.reduce((a, b) => a + b, 0) / h.length;
+  }
+
   emitSafely(event, payload) {
     if (this.listenerCount(event) > 0) this.emit(event, payload);
     else this.log(`${event}: ${payload && payload.message ? payload.message : payload}`);
@@ -164,7 +365,12 @@ class Pool extends EventEmitter {
 
   async refreshTemplate(reason) {
     try {
+      const askedAt = Date.now();
       const template = await this.rpc.getBlockTemplate();
+      // How long your node takes to hand over a template. If this climbs, the
+      // node is the bottleneck, not the miners — and a slow template means
+      // mining on stale work after somebody else finds a block.
+      this.recordNodeLatency(Date.now() - askedAt);
       // Log the recovery, not just the failure. For an unattended run this is
       // the pair of lines that explains a gap in the share history.
       if (this.stats.templateError) {
@@ -177,6 +383,9 @@ class Pool extends EventEmitter {
       this.stats.lastTemplateAt = Date.now();
       this.onTemplate(template, reason);
     } catch (err) {
+      // Forget the latency window while the node is unreachable, so the
+      // dashboard cannot show a healthy round-trip next to a template error.
+      this.nodeLatency = [];
       // Log the FIRST failure of an outage at any severity, then stay quiet so
       // a long outage does not fill the log. Previously a poll failure was
       // silent, so a node that went away left no trace at all.
@@ -210,6 +419,7 @@ class Pool extends EventEmitter {
     const job = new Job(id, template, this.payoutScript, this.config.coinbaseTag);
     this.jobs.set(id, job);
     this.currentJob = job;
+    if (isNewBlock) this.recordNetworkDifficulty(job.networkDifficulty, template.previousblockhash);
 
     // Keep a short history so shares still in flight when a job rotates are not
     // thrown away as "job not found".
@@ -429,6 +639,17 @@ class Pool extends EventEmitter {
   }
 
   handleMessage(client, msg) {
+    // A message with no method is a RESPONSE to something we asked, not a
+    // request. Without this branch it falls through to "unknown method" and we
+    // reply to a reply, which some firmware answers again.
+    if (msg.method === undefined) {
+      if (client.pendingPing && msg.id === client.pendingPing.id) {
+        client.latencyMs = Date.now() - client.pendingPing.sentAt;
+        client.pendingPing = null;
+      }
+      return;
+    }
+
     switch (msg.method) {
       case 'mining.subscribe':
         return this.handleSubscribe(client, msg);
@@ -578,6 +799,11 @@ class Pool extends EventEmitter {
     if (!client.authorized) {
       return this.reply(client, msg.id, null, [24, 'unauthorized worker', null]);
     }
+    if (this.draining) {
+      // Shutting down. Refusing now is honest and lets the drain finish; the
+      // miner reconnects to the new process in a second.
+      return this.reply(client, msg.id, null, [20, 'server is shutting down', null]);
+    }
     const [, jobId, extranonce2, ntime, nonce] = msg.params || [];
     const job = this.jobs.get(jobId);
     if (!job) {
@@ -596,13 +822,22 @@ class Pool extends EventEmitter {
     // Asynchronous on purpose: scrypt is expensive by design, and anyone who
     // reaches this port can ask for it. Running it on the event loop would let
     // a flood of junk submissions delay the one call that matters — submitblock.
-    const result = await validateShareAsync(effectiveJob, {
-      extranonce1: client.extranonce1,
-      extranonce2Hex: String(extranonce2 || ''),
-      ntimeHex: String(ntime || ''),
-      nonceHex: String(nonce || ''),
-      shareTarget: targets,
-    });
+    //
+    // The counter lets shutdown wait for work already in progress, so the last
+    // share before an update is not the one missing from the history.
+    this.inFlight = (this.inFlight || 0) + 1;
+    let result;
+    try {
+      result = await validateShareAsync(effectiveJob, {
+        extranonce1: client.extranonce1,
+        extranonce2Hex: String(extranonce2 || ''),
+        ntimeHex: String(ntime || ''),
+        nonceHex: String(nonce || ''),
+        shareTarget: targets,
+      });
+    } finally {
+      this.inFlight--;
+    }
 
     // A block is a block even if the miner has gone. Do NOT return early on a
     // dead socket before the candidate check: the scrypt hash runs on the
@@ -622,8 +857,10 @@ class Pool extends EventEmitter {
     if (result.isBlockCandidate) {
       this.submitBlock(effectiveJob, result, client);
     }
-    if (gone) return;
 
+    // Count the share even if the socket has gone. The work was done and
+    // verified; only the reply to the miner is pointless now. Returning early
+    // here would discard exactly the shares a shutdown drain exists to keep.
     client.accepted++;
     this.stats.accepted++;
     const now = Date.now();
@@ -642,7 +879,11 @@ class Pool extends EventEmitter {
       this.stats.bestShareDiff = result.shareDiff;
       this.stats.bestShareAt = now;
     }
+    if (this.store) {
+      this.store.recordShare(now, result.shareDiff, creditedDifficulty, client.worker);
+    }
 
+    if (gone) return;
     this.reply(client, msg.id, true);
     this.retarget(client);
   }
@@ -677,6 +918,7 @@ class Pool extends EventEmitter {
     client.rejected++;
     this.stats.rejected++;
     this.stats.rejectReasons[reason] = (this.stats.rejectReasons[reason] || 0) + 1;
+    if (this.store) this.store.recordReject(reason, client.worker);
   }
 
   // A found block is the entire point of the app, and submitblock is a single
@@ -702,6 +944,15 @@ class Pool extends EventEmitter {
   }
 
   async submitBlock(job, result, client) {
+    this.inFlightBlocks = (this.inFlightBlocks || 0) + 1;
+    try {
+      await this.submitBlockInner(job, result, client);
+    } finally {
+      this.inFlightBlocks--;
+    }
+  }
+
+  async submitBlockInner(job, result, client) {
     const address = client.payoutAddress || this.config.payoutAddress;
     this.log(
       `BLOCK CANDIDATE at height ${job.height} by ${client.worker} — ${result.blockHash}`
@@ -719,6 +970,12 @@ class Pool extends EventEmitter {
     };
     this.stats.blocks.unshift(record);
     if (this.stats.blocks.length > 50) this.stats.blocks.pop();
+    if (this.store) {
+      // The store keeps a copy WITHOUT the block hex: fifty mainnet blocks of
+      // hex is tens of megabytes, and the file is serialised synchronously.
+      this.store.recordBlock(record);
+      this.store.save(true); // a block is not something to leave unsaved
+    }
 
     // The full block hex, written out before the first attempt. If every
     // retry below somehow fails, this line in the container log is the
@@ -741,23 +998,30 @@ class Pool extends EventEmitter {
         record.accepted = true;
         this.stats.blocksFound++;
         this.stats.lastBlock = record;
+        if (this.store) {
+          this.store.updateBlock(record.hash, { status: 'accepted', accepted: true });
+          this.store.save(true);
+        }
         this.log(`BLOCK ACCEPTED at height ${job.height} — ${result.blockHash}`);
         this.emit('block', record);
       } else if (verdict.includes('inconclusive')) {
         record.status = 'stale';
         record.accepted = false;
         record.error = 'valid, but another block reached this height first';
+        if (this.store) this.store.updateBlock(record.hash, { status: 'stale', accepted: false, error: record.error });
         this.log(`block at height ${job.height} was orphaned (${verdict})`);
       } else {
         record.status = 'rejected';
         record.accepted = false;
         record.error = verdict;
+        if (this.store) this.store.updateBlock(record.hash, { status: 'rejected', accepted: false, error: verdict });
         this.log(`block REJECTED by node: ${verdict}`);
       }
     } catch (err) {
       record.status = 'error';
       record.accepted = false;
       record.error = err.message;
+      if (this.store) this.store.updateBlock(record.hash, { status: 'error', accepted: false, error: err.message });
       this.log(`block submission failed: ${err.message}`);
     }
     // Whatever happened, get a fresh template immediately.
@@ -841,6 +1105,7 @@ class Pool extends EventEmitter {
         payoutAddress: c.payoutAddress || this.config.payoutAddress,
         connectedAt: c.connectedAt,
         lastShareAt: c.lastShareAt,
+        latencyMs: c.latencyMs == null ? null : c.latencyMs,
         // Recent share timestamps, so the dashboard can show the rhythm of a
         // worker rather than just a number. A miner that stalled two minutes
         // ago looks identical to a healthy one on an averaged hashrate.
@@ -855,6 +1120,10 @@ class Pool extends EventEmitter {
       startedAt: this.stats.startedAt,
       height: job ? job.height : null,
       networkDifficulty: job ? job.networkDifficulty : null,
+      smoothedDifficulty: this.smoothedDifficulty(),
+      difficultySamples: (this.difficultyHistory || []).length,
+      nodeLatencyMs: this.medianNodeLatency(),
+      firstStartedAt: this.stats.firstStartedAt || this.stats.startedAt,
       coinbaseValue: job ? job.coinbaseValue : null,
       templateAgeMs: this.stats.lastTemplateAt ? Date.now() - this.stats.lastTemplateAt : null,
       templateError: this.stats.templateError,

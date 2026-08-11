@@ -12,6 +12,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const { Pool } = require('./pool');
+const { Store } = require('./store');
 
 const PORT = Number(process.env.PORT || 3000);
 const STRATUM_PORT = Number(process.env.STRATUM_PORT || 3333);
@@ -60,6 +61,7 @@ const config = {
   minLongpollIntervalMs: num('MIN_LONGPOLL_INTERVAL_MS', 250),
   handshakeTimeoutMs: num('HANDSHAKE_TIMEOUT_SECONDS', 30) * 1000,
   difficultyGraceMs: num('DIFFICULTY_GRACE_SECONDS', 60) * 1000,
+  pingIntervalMs: num('PING_INTERVAL_SECONDS', 60) * 1000,
   lockPayoutAddress: process.env.LOCK_PAYOUT_ADDRESS === '1',
 };
 
@@ -70,6 +72,14 @@ const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
 
 let pool = null;
 let startupError = null;
+
+// STATS_PATH empty disables persistence entirely, which is what the test
+// suites want: they must not write to the developer's disk.
+const store = new Store(
+  process.env.STATS_PATH === '' ? null : process.env.STATS_PATH || '/data/stats.json',
+  (msg) => console.log(`[store] ${msg}`)
+);
+store.load();
 
 function fmtHashrate(h) {
   if (!h) return { value: '0', unit: 'H/s' };
@@ -106,6 +116,34 @@ const server = http.createServer((req, res) => {
     const healthy = pool !== null && !startupError;
     res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: healthy, error: startupError }));
+    return;
+  }
+
+  // History is served separately from status: it is far larger and changes far
+  // more slowly, so the dashboard polls it every 30 seconds instead of every 5.
+  if (url.pathname === '/api/history') {
+    const s = store.state;
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        persistent: store.writable,
+        storeError: store.lastError,
+        firstStartedAt: s.firstStartedAt,
+        minuteSamples: s.minuteSamples,
+        hourSamples: s.hourSamples.map(([ts, hr]) => [ts, hr]),
+        shareLog: s.shareLog,
+        workers: s.workers,
+        lifetime: {
+          accepted: s.accepted,
+          rejected: s.rejected,
+          rejectReasons: s.rejectReasons,
+          blocksFound: store.blocksFound(),
+          bestShareDiff: s.bestShareDiff,
+          bestShareAt: s.bestShareAt,
+        },
+      })
+    );
     return;
   }
 
@@ -225,7 +263,7 @@ async function main() {
   // minute of retries there would be a dozen of each competing for the node's
   // RPC threads — starving the very call that submits a found block.
   for (let attempt = 1; ; attempt++) {
-    const p = new Pool(config);
+    const p = new Pool(config, store);
     p.on('error', (err) => console.error('[pool]', err.message));
     try {
       await p.start();
@@ -249,17 +287,35 @@ process.on('unhandledRejection', (reason) => {
   console.error('[fatal] unhandled rejection:', reason && reason.stack ? reason.stack : reason);
 });
 process.on('uncaughtException', (err) => {
-  // Something got past every guard. Log it in full and let the container's
-  // restart policy give us a clean process.
+  // Something got past every guard. Save what we have — this is the one path
+  // where losing the last half minute of history would hurt most — then log it
+  // in full and let the container's restart policy give us a clean process.
   console.error('[fatal] uncaught exception:', err && err.stack ? err.stack : err);
+  try { store.save(true); } catch { /* nothing left to try */ }
   process.exit(1);
 });
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => {
-    if (pool) pool.stop();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 3000).unref();
+  process.on(sig, async () => {
+    server.close();
+    if (!pool) {
+      store.save(true);
+      process.exit(0);
+      return;
+    }
+    // Close the stratum port FIRST and refuse new submissions, so the drain
+    // below can actually reach zero instead of chasing a moving target.
+    pool.beginShutdown();
+    // Then wait for work already in progress. This includes block submissions,
+    // whose retry schedule runs to about two minutes: exiting while one is
+    // pending is the one bug here that costs real money.
+    try {
+      const clean = await pool.drain(130000);
+      if (!clean) console.error('[shutdown] gave up waiting; some work was still in progress');
+    } catch { /* fall through and save anyway */ }
+    pool.stop();
+    try { store.save(true); } catch { /* nothing left to try */ }
+    process.exit(0);
   });
 }
 

@@ -62,10 +62,16 @@ function check(name, cond, detail) {
       return el && el.textContent !== '—';
     }, { timeout: 20000 }).catch(() => problems.push(`[${vp.name}] dashboard never rendered data`));
 
-    // The nonce'd stylesheet must actually have applied; if CSP blocked it the
-    // body keeps the browser default background.
-    const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-    check(`${vp.name}: nonce'd stylesheet applied`, bg === 'rgb(15, 13, 10)', bg);
+    // The nonce'd stylesheet must actually have applied. Check a property that
+    // does NOT change with page state — the body background legitimately
+    // differs once a block has been found.
+    const styled = await page.evaluate(() => {
+      const mast = document.querySelector('.mast');
+      const s = getComputedStyle(mast);
+      return { border: s.borderBottomColor, font: getComputedStyle(document.body).fontVariantNumeric };
+    });
+    check(`${vp.name}: nonce'd stylesheet applied`,
+      styled.border === 'rgb(44, 37, 28)' && styled.font === 'tabular-nums', JSON.stringify(styled));
 
     // No element may overflow the viewport horizontally.
     const overflow = await page.evaluate(() => {
@@ -95,8 +101,12 @@ function check(name, cond, detail) {
       check('ruler positioned the marker', !!ruler.left, String(ruler.left));
 
       // Keyboard focus must be visible — checked by actually focusing a button.
+      // It must be a VISIBLE one: the block-alarm dismiss button is first in the
+      // DOM but hidden until a block is found, and a hidden element cannot take
+      // focus, which would fail this check for the wrong reason.
       const focusVisible = await page.evaluate(() => {
-        const btn = document.querySelector('button');
+        const btn = [...document.querySelectorAll('button')].find((b) => b.offsetParent !== null);
+        if (!btn) return false;
         btn.focus();
         const s = getComputedStyle(btn);
         return document.activeElement === btn && s.outlineStyle !== 'none';

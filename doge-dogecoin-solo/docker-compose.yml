@@ -14,9 +14,15 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.0.0
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.1.0
     restart: on-failure
     logging: *default-logging
+    volumes:
+      # Statistics that survive a restart: shares, best share ever, hashrate
+      # history, blocks found. Without this the dashboard can only ever describe
+      # the time since the last update, which for a multi-year lottery is the
+      # least interesting window there is.
+      - ${APP_DATA_DIR}/data:/data
     ports:
       # Stratum. Reachable from your LAN so miners can connect. Do NOT forward
       # this on your router — anyone who reaches it can mine to their own
@@ -25,6 +31,8 @@ services:
     environment:
       PORT: "3000"
       STRATUM_PORT: "22557"
+      # Where the durable statistics live. Set to an empty string to disable.
+      STATS_PATH: "/data/stats.json"
 
       # The Dogecoin node app. Full container name rather than the bare service
       # name: every Umbrel app shares one docker network, so service aliases can
@@ -87,6 +95,9 @@ services:
       # still accepted for this long. Without it, every raise produces a burst
       # of rejects that looks like failing hardware.
       DIFFICULTY_GRACE_SECONDS: "60"
+      # How often each worker is pinged with client.get_version to measure the
+      # round-trip time. Miners that ignore the request simply show no latency.
+      PING_INTERVAL_SECONDS: "60"
       # Set to 1 to ignore the address in a worker's username and pay every
       # block to PAYOUT_ADDRESS instead. Worth doing if anyone you would not
       # hand a block to can reach this port.
@@ -104,3 +115,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # The minimum for the startup chown and the privilege drop, and nothing
+      # more. FOWNER and DAC_OVERRIDE are deliberately absent: nothing in the
+      # entrypoint needs them, and PID 1 stays root for the container's life.
+      - CHOWN
+      - SETUID
+      - SETGID
