@@ -1,0 +1,106 @@
+version: "3.7"
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app_proxy:
+    environment:
+      APP_HOST: doge-dogecoin-solo_app_1
+      APP_PORT: 3000
+      PROXY_AUTH_ADD: "true"
+
+  app:
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.0.0
+    restart: on-failure
+    logging: *default-logging
+    ports:
+      # Stratum. Reachable from your LAN so miners can connect. Do NOT forward
+      # this on your router — anyone who reaches it can mine to their own
+      # address using your node's block templates.
+      - "22557:22557"
+    environment:
+      PORT: "3000"
+      STRATUM_PORT: "22557"
+
+      # The Dogecoin node app. Full container name rather than the bare service
+      # name: every Umbrel app shares one docker network, so service aliases can
+      # collide across apps.
+      RPC_HOST: doge-dogecoin-node_dogecoind_1
+      RPC_PORT: "22555"
+      # umbrelOS sources exports.sh from an app's declared dependencies — not
+      # from every installed app — before rendering this file. These variables
+      # resolve only because umbrel-app.yml lists doge-dogecoin-node under
+      # `dependencies`. Remove that line and the password silently becomes an
+      # empty string, and the app retries against a 401 forever.
+      RPC_USER: ${APP_DOGECOIN_NODE_RPC_USER:-umbrel}
+      RPC_PASSWORD: ${APP_DOGECOIN_NODE_RPC_PASS:-}
+
+      # ------------------------------------------------------------------
+      # REQUIRED: the Dogecoin address that block rewards are paid to.
+      # A worker may override this by putting its own address in the stratum
+      # username field. Get this wrong and a found block pays a stranger, so
+      # the app refuses to start until it is set and passes checksum validation.
+      # ------------------------------------------------------------------
+      PAYOUT_ADDRESS: "DU4KTk97aC46ZbXjdTpP9tFNYCrmuLZXLd"
+
+      # --- share difficulty ---------------------------------------------
+      # Stratum difficulty for scrypt: one share costs D * 2^16 hashes, NOT
+      # D * 2^32 as on Bitcoin. Every scrypt miner applies that 2^16 factor
+      # (cgminer: `if (opt_scrypt) d64 *= 65536`), so the numbers here look
+      # large compared to a Bitcoin pool and that is correct.
+      #
+      # Vardiff tunes each worker individually; these are only the bounds.
+      # 2048 suits an 11 MH/s device at roughly one share every 12 seconds.
+      START_DIFFICULTY: "2048"
+      MIN_DIFFICULTY: "64"
+      MAX_DIFFICULTY: "4194304"
+      TARGET_SHARE_SECONDS: "12"
+      VARDIFF_WINDOW: "10"
+
+      # --- timing --------------------------------------------------------
+      # New blocks arrive via getblocktemplate longpoll within milliseconds;
+      # this poll is only a safety net if longpoll is interrupted.
+      POLL_INTERVAL_SECONDS: "5"
+      JOB_REBUILD_SECONDS: "30"
+      HASHRATE_WINDOW_SECONDS: "600"
+      SOCKET_TIMEOUT_SECONDS: "900"
+
+      COINBASE_TAG: "/umbrel-doge-solo/"
+
+      # --- limits --------------------------------------------------------
+      # Stratum has no authentication — there is no account to authenticate
+      # against — so anything unbounded is a denial-of-service path for anyone
+      # who can reach port 22557. These are the ceilings.
+      MAX_CONNECTIONS: "64"
+      # Per source address. Without this, one machine opening silent TCP
+      # sockets takes every slot and locks your real miners out.
+      MAX_CONNECTIONS_PER_IP: "8"
+      MAX_MESSAGES_PER_10S: "300"
+      MAX_PAYOUT_VARIANTS: "16"
+      # Seconds a connection may sit without authorizing before it is dropped.
+      HANDSHAKE_TIMEOUT_SECONDS: "30"
+      # After a difficulty increase, work the miner had already been handed is
+      # still accepted for this long. Without it, every raise produces a burst
+      # of rejects that looks like failing hardware.
+      DIFFICULTY_GRACE_SECONDS: "60"
+      # Set to 1 to ignore the address in a worker's username and pay every
+      # block to PAYOUT_ADDRESS instead. Worth doing if anyone you would not
+      # hand a block to can reach this port.
+      LOCK_PAYOUT_ADDRESS: "0"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

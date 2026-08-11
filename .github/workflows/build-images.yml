@@ -36,11 +36,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The tag must change whenever the image content changes. Republishing
+          # the same tag mutates it in place, so umbrelOS can pull the OLD
+          # digest for a NEW app version and report a successful update that
+          # changed nothing.
           - name: umbrel-dogecoin-core
             context: images/core
-            tag: "1.14.9"
+            tag: "1.14.9-1"
           - name: umbrel-dogecoin-ui
             context: images/ui
+            tag: "1.0.0"
+          - name: umbrel-dogecoin-stratum
+            context: images/stratum
             tag: "1.0.0"
     steps:
       - uses: actions/checkout@v4
@@ -69,15 +76,21 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.name }}:${{ matrix.tag }}
             ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.name }}:latest
-          # GHCR links a package to a repository — and inherits its visibility —
-          # by reading this label. Without it both packages land orphaned and
-          # private, and you have to hunt through package settings.
+          # This label LINKS the package to the repository. It does NOT make it
+          # public: GitHub creates every new package private regardless, and a
+          # package inherits the repository's permissions but not its
+          # visibility. umbrelOS pulls anonymously, so after the first run of
+          # this workflow each NEW package must be switched to Public by hand at
+          # https://github.com/<owner>?tab=packages — otherwise the app install
+          # fails on the image pull.
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
+      # GitHub Actions only interpolates ${{ }}, so a bare {{ }} Go template is
+      # passed through to docker untouched.
       - name: Show the digest to pin
         run: |
           echo "Pin this in docker-compose.yml before sharing the store widely:"

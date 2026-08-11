@@ -1,0 +1,94 @@
+manifestVersion: 1
+id: doge-dogecoin-solo
+category: bitcoin
+name: Dogecoin Solo Mining
+version: "1.0.0"
+tagline: Point your scrypt miners at your own Dogecoin node
+description: >-
+  A stratum server that turns your Dogecoin node into a solo mining pool of one.
+
+
+  BEFORE YOU INSTALL: set PAYOUT_ADDRESS in this app's docker-compose.yml to a Dogecoin address you
+  control. The app deliberately refuses to mine without one, so that it can never build a block whose
+  reward nobody can spend. Set it in the app store repository rather than on the device — an edit to
+  the running copy is replaced the next time the app updates.
+
+
+  Your miners connect to this app instead of to somebody else's pool. Every block template comes from
+  your own node, every candidate block is submitted by your own node, and the reward pays straight to
+  an address you control. There is no pool operator, no fee, and no account.
+
+
+  Because there is no pool, there is also no payout system to trust or corrupt: the coinbase of the
+  block IS the payout. Put a Dogecoin address in your miner's username field and any block that worker
+  finds pays that address directly. Leave it blank and the app's configured address is used.
+
+
+  The dashboard shows per-worker hashrate, share difficulty, your best share so far as a percentage of
+  network difficulty, and the expected time to a block at your current hashrate. Per-worker variable
+  difficulty means a 10 MH/s device and a 500 MH/s device can share the same server without one
+  drowning out the other.
+
+
+  Be clear-eyed about the odds. Solo mining is a lottery: with a few hundred MH/s against a multi-
+  petahash network you should expect years between blocks, and when you do win, you win the whole
+  block. The dashboard shows your real expected time so you can decide for yourself. Much lottery.
+  Very patience.
+developer: Andreas
+website: https://github.com/andreashetem-cloud/umbrel-dogecoin
+dependencies:
+  - doge-dogecoin-node
+repo: https://github.com/andreashetem-cloud/umbrel-dogecoin
+support: https://github.com/andreashetem-cloud/umbrel-dogecoin/issues
+port: 22551
+icon: https://raw.githubusercontent.com/andreashetem-cloud/umbrel-dogecoin/main/doge-dogecoin-solo/icon.svg
+gallery:
+  - https://raw.githubusercontent.com/andreashetem-cloud/umbrel-dogecoin/main/doge-dogecoin-solo/gallery/1.jpg
+  - https://raw.githubusercontent.com/andreashetem-cloud/umbrel-dogecoin/main/doge-dogecoin-solo/gallery/2.jpg
+  - https://raw.githubusercontent.com/andreashetem-cloud/umbrel-dogecoin/main/doge-dogecoin-solo/gallery/3.jpg
+path: ""
+defaultPassword: ""
+deterministicPassword: false
+torOnly: false
+installSize: 200000000
+releaseNotes: >-
+  First release. Stratum v1 with per-worker variable difficulty, block templates over getblocktemplate
+  longpoll for instant new-block switching, per-worker payout addresses, and a dashboard showing
+  hashrate, best share and expected time to a block. Block construction is verified against a real
+  Dogecoin Core node in the test suite.
+widgets:
+  - id: "hashrate"
+    type: "text-with-progress"
+    refresh: "10s"
+    endpoint: "app:3000/api/widget/hashrate"
+    link: ""
+    example:
+      type: "text-with-progress"
+      link: ""
+      title: "Solo hashrate"
+      text: "83.4 MH/s"
+      progressLabel: "best share 7.9%"
+      progress: 0.79
+  - id: "stats"
+    type: "four-stats"
+    refresh: "10s"
+    endpoint: "app:3000/api/widget/stats"
+    link: ""
+    example:
+      type: "four-stats"
+      link: ""
+      items:
+        - title: "Hashrate"
+          text: "83.4"
+          subtext: "MH/s"
+        - title: "Workers"
+          text: "2"
+          subtext: "connected"
+        - title: "Best share"
+          text: "412k"
+          subtext: "difficulty"
+        - title: "Blocks"
+          text: "0"
+          subtext: "found"
+submitter: Andreas
+submission: https://github.com/andreashetem-cloud/umbrel-dogecoin

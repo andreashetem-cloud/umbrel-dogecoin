@@ -138,6 +138,11 @@ assert_conf_has  "RPC port"                          "rpcport=22555"
 assert_conf_has  "private RPC range 10/8"            "rpcallowip=10.0.0.0/8"
 assert_conf_has  "private RPC range 192.168/16"      "rpcallowip=192.168.0.0/16"
 assert_conf_lacks "no public rpcallowip"             "rpcallowip=0.0.0.0/0"
+# Dogecoin Core's defaults (4 threads, queue of 16) are exhausted by a single
+# getblocktemplate longpoll, which the solo mining app holds open permanently.
+# Every other RPC caller then gets "Work queue depth exceeded".
+assert_conf_has  "RPC threads raised above the default of 4" "rpcthreads=8"
+assert_conf_has  "RPC work queue raised above the default"   "rpcworkqueue=64"
 assert_conf_lacks "pruning off by default"           "prune=0"
 assert_conf_lacks "txindex off by default"           "txindex=1"
 assert_conf_lacks "bloom filters off by default"     "peerbloomfilters=1"

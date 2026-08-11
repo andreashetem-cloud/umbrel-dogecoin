@@ -90,7 +90,24 @@ for app_dir in app_dirs:
     elif "YOUR-GITHUB-USERNAME" in str(icon):
         placeholder(f"{app_dir}: 'icon' still contains the placeholder — run scripts/configure.sh")
 
+    # An absolute URL that 404s is worse than no URL: umbrelOS shows a broken
+    # image and there is nothing in any log to explain it. The URL points at
+    # this repo, so the file has to exist here.
+    def asset_must_exist(url: str, label: str) -> None:
+        match = re.match(
+            r"https://raw\.githubusercontent\.com/[^/]+/[^/]+/[^/]+/(.+)$", str(url)
+        )
+        if not match:
+            return
+        path = os.path.join(ROOT, match.group(1))
+        if not os.path.isfile(path):
+            err(f"{app_dir}: {label} points at {match.group(1)}, which is not in this repo")
+
+    if icon and str(icon).startswith("http"):
+        asset_must_exist(icon, "'icon'")
+
     for item in manifest.get("gallery") or []:
+        asset_must_exist(item, "gallery entry")
         if not str(item).startswith("http"):
             err(f"{app_dir}: gallery entry {item!r} must be an absolute URL")
         elif "YOUR-GITHUB-USERNAME" in str(item):
@@ -122,6 +139,17 @@ for app_dir in app_dirs:
 
     # Widget endpoints are resolved by umbreld against the bare compose service
     # name, so the host part must match a service key exactly.
+    # umbreld resolves dependencies by app id against installed apps, with no
+    # store restriction — but a dependency naming an app that exists nowhere
+    # breaks the install dialog outright (undefined.id in the umbrelOS UI).
+    for dep in manifest.get("dependencies") or []:
+        if dep in app_dirs:
+            continue
+        warn(
+            f"{app_dir}: depends on {dep!r}, which is not in this store — it must "
+            "come from the official store or another store the user has added"
+        )
+
     widgets = manifest.get("widgets") or []
     if len(widgets) > 3:
         err(f"{app_dir}: umbrelOS allows at most 3 widgets, found {len(widgets)}")

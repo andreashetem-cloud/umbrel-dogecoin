@@ -20,7 +20,7 @@ services:
   # Dogecoin Core full node
   # ---------------------------------------------------------------------
   dogecoind:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-core:1.14.9
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-core:1.14.9-1
     restart: on-failure
     stop_grace_period: 5m
     logging: *default-logging
@@ -44,10 +44,19 @@ services:
       # these ranges (a Tailscale peer, say) is refused. 100.64.0.0/10 is
       # included for exactly that case.
       RPC_ALLOW_IP: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1"
+      # Dogecoin Core ships with 4 RPC threads and a queue of 16. A mining
+      # longpoll holds a thread open until the next block, so the defaults run
+      # out and everything else starts getting "Work queue depth exceeded".
+      RPC_THREADS: "8"
+      RPC_WORKQUEUE: "64"
 
       # --- tuning -------------------------------------------------------
       # Change a value, then restart the app from umbrelOS.
-      DBCACHE: "1000"           # MB of RAM for the UTXO cache. Raise to 4000+ during the initial sync only.
+      # MB of RAM for the UTXO cache. 1000 is a good steady-state value: plenty
+      # for validating new blocks without holding gigabytes hostage. Raise it to
+      # 4000+ *during the initial sync only* — it dramatically speeds up IBD, but
+      # after that it buys almost nothing and costs you several GB of RAM.
+      DBCACHE: "1000"
       MAXCONNECTIONS: "64"     # Maximum peers.
       MAXUPLOADTARGET: "0"     # Daily upload cap in MiB. 0 = unlimited.
       MAXMEMPOOL: "300"        # Mempool cap in MB.

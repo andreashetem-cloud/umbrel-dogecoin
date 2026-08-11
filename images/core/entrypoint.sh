@@ -37,6 +37,15 @@ PAR="${PAR:-0}"
 MAXMEMPOOL="${MAXMEMPOOL:-300}"
 PEERBLOOMFILTERS="${PEERBLOOMFILTERS:-0}"
 
+# Dogecoin Core defaults to 4 RPC threads and a queue of 16. That is enough for
+# a dashboard polling every few seconds, but not once something holds a thread
+# open — a getblocktemplate longpoll, which mining software uses to learn about
+# new blocks instantly, occupies one thread for as long as it waits. Four
+# threads then run out and every other caller gets HTTP 500 "Work queue depth
+# exceeded". Raising these costs a few hundred kilobytes of stacks.
+RPC_THREADS="${RPC_THREADS:-8}"
+RPC_WORKQUEUE="${RPC_WORKQUEUE:-64}"
+
 TOR_ENABLED="${TOR_ENABLED:-0}"
 TOR_ONLY="${TOR_ONLY:-0}"
 TOR_PROXY_IP="${TOR_PROXY_IP:-}"
@@ -55,7 +64,8 @@ is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 for pair in "RPC_PORT:${RPC_PORT}" "P2P_PORT:${P2P_PORT}" "DBCACHE:${DBCACHE}" \
             "MAXCONNECTIONS:${MAXCONNECTIONS}" "MAXUPLOADTARGET:${MAXUPLOADTARGET}" \
-            "PRUNE:${PRUNE}" "PAR:${PAR}" "MAXMEMPOOL:${MAXMEMPOOL}"; do
+            "PRUNE:${PRUNE}" "PAR:${PAR}" "MAXMEMPOOL:${MAXMEMPOOL}" \
+            "RPC_THREADS:${RPC_THREADS}" "RPC_WORKQUEUE:${RPC_WORKQUEUE}"; do
   name="${pair%%:*}"; value="${pair#*:}"
   is_uint "${value}" || die "${name} must be a whole number, got '${value}'"
 done
@@ -141,6 +151,8 @@ fi
   for cidr in "${_allow[@]}"; do
     [[ -n "${cidr}" ]] && echo "rpcallowip=${cidr}"
   done
+  echo "rpcthreads=${RPC_THREADS}"
+  echo "rpcworkqueue=${RPC_WORKQUEUE}"
   echo "dbcache=${DBCACHE}"
   echo "maxconnections=${MAXCONNECTIONS}"
   echo "maxuploadtarget=${MAXUPLOADTARGET}"

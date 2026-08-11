@@ -2,7 +2,7 @@ manifestVersion: 1
 id: doge-dogecoin-node
 category: bitcoin
 name: Dogecoin Node
-version: "1.14.9"
+version: "1.14.9-1"
 tagline: Run your own Dogecoin full node, powered by Dogecoin Core
 description: >-
   Run a full Dogecoin node on your Umbrel, powered by the official Dogecoin Core release binaries.
@@ -27,11 +27,11 @@ description: >-
   live and why editing the running copy does not stick.
 
 
-  Runs pruned by default: about 20 GB of block data plus roughly 13 GB of chainstate, so reserve
-  around 35 GB. Pruning only discards old blocks; the UTXO set is always kept in full. The initial
-  sync still downloads the entire chain, close to 190 GB, and takes a day or more depending on your
-  disk and connection. Change PRUNE in the compose file for a full archival node. Much node. Very
-  decentralised.
+  Runs pruned by default: about 20 GB of block data plus roughly 13 GB of chainstate, so reserve around
+  35 GB. Pruning only discards old blocks — the UTXO set is always kept in full. The initial sync still
+  downloads the entire chain over the network, close to 190 GB, and takes anywhere from a day to a few
+  days depending on your disk and connection. Change PRUNE in the compose file for a full archival node.
+  Much node. Very decentralised.
 developer: Dogecoin Core developers
 website: https://dogecoin.com
 dependencies: []
@@ -49,9 +49,11 @@ deterministicPassword: false
 torOnly: false
 installSize: 36000000000
 releaseNotes: >-
-  First release. Dogecoin Core 1.14.9 built from the official, PGP-signed release binaries, with a
-  dashboard for sync status, peers and RPC connection details, optional Tor routing, and a hardened
-  container setup (no wallet, no root, no capabilities beyond what is needed).
+  Raises the node's RPC threads and work queue above Dogecoin Core's defaults of 4 and 16. A single
+  getblocktemplate longpoll — which mining software holds open until the next block — occupies one of
+  those four threads, and everything else then starts failing with "Work queue depth exceeded".
+  Also lowers the default UTXO cache to 1000 MB, which is ample once the initial sync is done, and
+  corrects the disk figures in this listing.
 widgets:
   - id: "sync"
     type: "text-with-progress"
