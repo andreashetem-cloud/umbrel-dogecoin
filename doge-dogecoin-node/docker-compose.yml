@@ -47,7 +47,7 @@ services:
 
       # --- tuning -------------------------------------------------------
       # Change a value, then restart the app from umbrelOS.
-      DBCACHE: "4000"           # MB of RAM for the UTXO cache. 2000+ dramatically speeds up the initial sync.
+      DBCACHE: "1000"           # MB of RAM for the UTXO cache. Raise to 4000+ during the initial sync only.
       MAXCONNECTIONS: "64"     # Maximum peers.
       MAXUPLOADTARGET: "0"     # Daily upload cap in MiB. 0 = unlimited.
       MAXMEMPOOL: "300"        # Mempool cap in MB.
