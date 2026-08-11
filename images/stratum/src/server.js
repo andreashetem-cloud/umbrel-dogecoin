@@ -13,6 +13,7 @@ const crypto = require('node:crypto');
 
 const { Pool } = require('./pool');
 const { Store } = require('./store');
+const { PushService } = require('./push');
 
 const PORT = Number(process.env.PORT || 3000);
 const STRATUM_PORT = Number(process.env.STRATUM_PORT || 3333);
@@ -65,10 +66,17 @@ const config = {
   lockPayoutAddress: process.env.LOCK_PAYOUT_ADDRESS === '1',
 };
 
+// Half an hour of minute samples before a per-worker average is used to judge
+// anything. Below that it is a measure of how long the worker has been back,
+// not of how it normally performs.
+const MIN_SAMPLES_FOR_AVERAGE = 30;
+
 const SYNC_REFRESH = '10s';
 const STATS_REFRESH = '10s';
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+const SERVICE_WORKER = fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf8');
+const ICON_PNG = fs.readFileSync(path.join(__dirname, 'icon-192.png'));
 
 let pool = null;
 let startupError = null;
@@ -80,6 +88,78 @@ const store = new Store(
   (msg) => console.log(`[store] ${msg}`)
 );
 store.load();
+
+// Push state lives beside the statistics but in its own file: it holds a
+// private key, it is written on a different schedule, and a corrupt stats file
+// must not cost the user their notification subscriptions or vice versa.
+const push = new PushService(
+  store.path ? path.join(path.dirname(store.path), 'push.json') : null,
+  (msg) => console.log(`[push] ${msg}`)
+);
+push.load();
+
+// Is this POST from our own page, or from some other site the user happens to
+// have open?
+//
+// It matters because Umbrel's proxy authenticates with a cookie, which the
+// browser attaches to cross-site requests as well. Without this check any page
+// the user visits could register ITS push endpoint with this app and be told
+// the moment a block is found, or evict the user's own phone from the list.
+//
+// Two independent gates, because browsers vary in what they send:
+//   - Sec-Fetch-Site must be same-origin (Chrome, Firefox, Safari all send it,
+//     and a page cannot forge it).
+//   - Origin, when present, must match the Host header.
+// A request with neither header is not a browser form post at all; requiring
+// the JSON content type stops it from being a CORS "simple request".
+function sameOriginPost(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  // Sec-Fetch-Site: same-origin is conclusive on its own — a page cannot forge
+  // it. Checking Origin against Host as well would break any deployment whose
+  // reverse proxy rewrites the Host header (nginx does by default), turning
+  // notifications into a blanket 403 with nothing in the log to explain it.
+  if (site !== 'same-origin') {
+    const origin = req.headers.origin;
+    if (origin) {
+      try {
+        const host = new URL(origin).host;
+        // x-forwarded-host is what a proxy that rewrites Host leaves behind.
+        const forwarded = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+        if (host !== req.headers.host && host !== forwarded) return false;
+      } catch { return false; }
+    }
+  }
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  return type === 'application/json';
+}
+
+async function handlePushPost(req, res, pathname) {
+  const reply = (code, body) => {
+    res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+  if (!sameOriginPost(req)) {
+    // Drain nothing and answer immediately; there is no reason to read a body
+    // we have already decided not to act on.
+    return reply(403, { ok: false, error: 'cross-site request refused' });
+  }
+  if (!push.enabled) return reply(503, { ok: false, error: 'notifications are unavailable' });
+
+  const body = await readJsonBody(req);
+  if (!body) return reply(400, { ok: false, error: 'expected a small JSON object' });
+
+  if (pathname === '/api/push/test') {
+    const result = await push.notifyAll('test');
+    return reply(200, { ok: true, ...result });
+  }
+  const endpoint = typeof body.endpoint === 'string' ? body.endpoint : null;
+  if (pathname === '/api/push/unsubscribe') {
+    return reply(200, push.unsubscribe(endpoint));
+  }
+  const result = push.subscribe(endpoint);
+  return reply(result.ok ? 200 : 400, { ...result, subscriptions: push.subscriptions.length });
+}
 
 function fmtHashrate(h) {
   if (!h) return { value: '0', unit: 'H/s' };
@@ -101,16 +181,75 @@ function snapshotOrNull() {
   }
 }
 
+// Reads a small JSON body. Bounded before anything is parsed: this is the only
+// endpoint that accepts input from a browser, and an unbounded read is a way to
+// exhaust the process's memory with a single request.
+const MAX_BODY_BYTES = 4096;
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        // Destroy rather than merely stop reading, so the sender cannot hold
+        // the connection open streaming into a socket we are ignoring.
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null);
+      } catch {
+        resolve(null);
+      }
+    });
+    req.on('error', () => resolve(null));
+  });
+}
+
 const server = http.createServer((req, res) => {
+  // llhttp accepts an absolute-form request target, so req.url can be a string
+  // new URL() rejects — "GET http://[ HTTP/1.1" is enough. Unguarded, that is
+  // an uncaught exception in the request handler, which this process answers by
+  // exiting. Any device on the home network could therefore kill the app in the
+  // middle of submitting a block.
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('bad request target');
+    return;
+  }
+
   // The dashboard sits behind Umbrel's authenticating proxy, but defence in
-  // depth costs nothing here.
+  // depth costs nothing here. POST is allowed only for the notification
+  // endpoints, which need it to receive a subscription.
+  const PUSH_POST_PATHS = new Set(['/api/push/subscribe', '/api/push/unsubscribe', '/api/push/test']);
+  if (req.method === 'POST' && PUSH_POST_PATHS.has(url.pathname)) {
+    // A rejection here would leave the request hanging open forever and, with
+    // no handler, take the process down as an unhandled rejection.
+    handlePushPost(req, res, url.pathname).catch((err) => {
+      console.error('[push]', err.message);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+      } else {
+        res.end();
+      }
+    });
+    return;
+  }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { Allow: 'GET, HEAD' });
     res.end();
     return;
   }
-
-  const url = new URL(req.url, 'http://localhost');
 
   if (url.pathname === '/health') {
     const healthy = pool !== null && !startupError;
@@ -133,7 +272,32 @@ const server = http.createServer((req, res) => {
         minuteSamples: s.minuteSamples,
         hourSamples: s.hourSamples.map(([ts, hr]) => [ts, hr]),
         shareLog: s.shareLog,
-        workers: s.workers,
+        // Without the per-worker sample series. Two workers with a day of
+        // minutes each is ~60 kB, and this endpoint is polled every 30
+        // seconds — on a phone over mobile data that is the whole budget for
+        // a chart nobody has opened. The series is fetched per worker from
+        // /api/worker when the detail panel is actually shown.
+        workers: Object.fromEntries(
+          Object.entries(s.workers).map(([name, w]) => {
+            const { samples, ...rest } = w;
+            const list = Array.isArray(samples) ? samples : [];
+            // The one number the summary view needs from the series: this
+            // worker's own 24-hour mean, which is what "it is running at half
+            // its normal rate" is measured against. Computed here so the
+            // series itself does not have to travel.
+            // Windowed by timestamp and suppressed until there is enough of it.
+            // The health badge compares live hashrate against this and says
+            // "N% of its own 24h average"; the mean of three ramp-up samples
+            // is not a 24-hour average and would make that warning fire on a
+            // miner that just reconnected.
+            const dayAgo = Math.round(Date.now() / 1000) - 86400;
+            const recent = list.filter((p) => p[0] >= dayAgo);
+            const avg24h = recent.length >= MIN_SAMPLES_FOR_AVERAGE
+              ? Math.round(recent.reduce((sum, p) => sum + p[1], 0) / recent.length)
+              : 0;
+            return [name, { ...rest, sampleCount: list.length, avg24h }];
+          })
+        ),
         lifetime: {
           accepted: s.accepted,
           rejected: s.rejected,
@@ -144,6 +308,60 @@ const server = http.createServer((req, res) => {
         },
       })
     );
+    return;
+  }
+
+  // The VAPID public key the browser needs to subscribe, plus whether anything
+  // is subscribed at all so the UI can show the real state rather than a
+  // checkbox that remembers nothing.
+  if (url.pathname === '/api/push/key') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({
+      ok: push.enabled,
+      key: push.publicKeyBase64(),
+      subscriptions: push.subscriptions.length,
+      error: push.enabled ? null : 'notifications are unavailable without a writable data directory',
+    }));
+    return;
+  }
+
+  // The notification icon. Small, cached, and the only binary this app serves.
+  if (url.pathname === '/icon-192.png') {
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': ICON_PNG.length,
+      'Cache-Control': 'public, max-age=86400',
+    });
+    res.end(req.method === 'HEAD' ? undefined : ICON_PNG);
+    return;
+  }
+
+  if (url.pathname === '/sw.js') {
+    // Served from the root so its scope covers the whole dashboard.
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Service-Worker-Allowed': '/',
+    });
+    res.end(SERVICE_WORKER);
+    return;
+  }
+
+  // One worker's own history, fetched when its detail panel is opened.
+  if (url.pathname === '/api/worker') {
+    const name = url.searchParams.get('name') || '';
+    // hasOwnProperty, not a bare lookup: `?name=constructor` would otherwise
+    // resolve through the prototype chain and return a truthy function, which
+    // JSON.stringify drops — producing a 200 with no worker in it.
+    const w = Object.prototype.hasOwnProperty.call(store.state.workers, name)
+      ? store.state.workers[name] : null;
+    if (!w || typeof w !== 'object') {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: false, error: 'unknown worker' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ ok: true, name, worker: w }));
     return;
   }
 
@@ -231,7 +449,11 @@ const server = http.createServer((req, res) => {
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Security-Policy':
         `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
-        `connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
+        // worker-src is NOT covered by the nonce: a service worker is fetched
+        // by URL, so without this the registration is refused by the policy and
+        // notifications silently never work.
+        `connect-src 'self'; img-src 'self' data:; worker-src 'self'; ` +
+        `base-uri 'none'; form-action 'none'; frame-ancestors 'self'`,
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-store',
@@ -251,6 +473,11 @@ async function main() {
     console.error(`[config] ${startupError}`);
   }
 
+  // Without this an EADDRINUSE is an uncaught exception rather than a message.
+  server.on('error', (err) => {
+    console.error(`[web] cannot serve on port ${PORT}: ${err.message}`);
+    startupError = `the dashboard could not start: ${err.message}`;
+  });
   server.listen(PORT, () => console.log(`[web] dashboard on :${PORT}`));
 
   if (startupError) return;
@@ -265,6 +492,19 @@ async function main() {
   for (let attempt = 1; ; attempt++) {
     const p = new Pool(config, store);
     p.on('error', (err) => console.error('[pool]', err.message));
+    // Wake subscribed phones. Both events fire for the same block — found, then
+    // accepted — and the service worker uses one notification tag, so the
+    // second replaces the first instead of buzzing twice.
+    //
+    // The catch is not decoration: this runs on the block path, and an
+    // unhandled rejection here would take down the process that is in the
+    // middle of submitting the block.
+    const announce = (reason) => (record) => {
+      push.notifyAll(`${reason} ${record && record.height}`)
+        .catch((err) => console.error('[push]', err.message));
+    };
+    p.on('blockfound', announce('block found'));
+    p.on('block', announce('block accepted'));
     try {
       await p.start();
       pool = p;

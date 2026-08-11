@@ -205,6 +205,25 @@ const cfg = (extra) => ({
     await sleep(200);
   }
 
+  console.log('\na winning share is never discarded by our own clock');
+  {
+    const { Job, judgeShare } = require('../images/stratum/src/job');
+    // A job whose network target is the easiest possible, so any hash wins.
+    const job = { networkTarget: (1n << 256n) - 1n, serializeBlock: () => 'deadbeef' };
+    const prepared = { header: Buffer.alloc(80), coinbase: Buffer.alloc(10), ntimeTooFarAhead: true };
+    const powHash = Buffer.alloc(32, 0x11);
+    const verdict = judgeShare(job, prepared, powHash, [1n]);
+    check('a block candidate with an out-of-bounds ntime is still accepted',
+      verdict.ok === true && verdict.isBlockCandidate === true, JSON.stringify(verdict.reason));
+    check('and it is serialised for submission', verdict.blockHex === 'deadbeef', String(verdict.blockHex));
+
+    // The same share, without the work, is refused for the right reason.
+    const hardJob = { networkTarget: 1n, serializeBlock: () => 'x' };
+    const refused = judgeShare(hardJob, prepared, powHash, [1n]);
+    check('a non-winning share with a bad ntime is still refused',
+      refused.ok === false && /ntime/.test(refused.reason), JSON.stringify(refused.reason));
+  }
+
   console.log(failures === 0 ? '\nSECOND-ROUND FIXES VERIFIED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })().catch((e) => { console.error('fatal:', e.stack || e.message); process.exit(1); });

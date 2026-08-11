@@ -115,6 +115,29 @@ function serializeScriptNumber(n) {
   return Buffer.from(bytes);
 }
 
+// The BIP34 coinbase height, encoded exactly as Dogecoin Core writes it.
+//
+// Verified against the consensus check itself. src/validation.cpp builds the
+// expected prefix as `CScript expect = CScript() << nHeight;` and requires the
+// coinbase scriptSig to start with those exact bytes; src/script/script.h
+// push_int64() emits a SINGLE opcode for small numbers:
+//
+//     if (n == -1 || (n >= 1 && n <= 16)) push_back(n + (OP_1 - 1));
+//     else if (n == 0)                    push_back(OP_0);
+//     else                                *this << CScriptNum::serialize(n);
+//
+// So heights 1..16 are OP_1..OP_16 (0x51..0x60), height 0 is OP_0, and only
+// from 17 upwards is it a length-prefixed push. Encoding height 3 as the data
+// push `01 03` instead of `OP_3` produces a block Dogecoin rejects with
+// bad-cb-height. Mainnet passed 16 in 2013, so this only bites on a fresh
+// regtest chain — but it is a consensus rule, and matching it costs three
+// lines.
+function coinbaseHeightScript(height) {
+  if (height === 0) return Buffer.from([0x00]); // OP_0
+  if (height >= 1 && height <= 16) return Buffer.from([0x50 + height]); // OP_1..OP_16
+  return scriptPush(serializeScriptNumber(height));
+}
+
 // A script data push of `buf`, using the smallest legal opcode.
 function scriptPush(buf) {
   if (buf.length < 0x4c) return Buffer.concat([Buffer.from([buf.length]), buf]);
@@ -310,6 +333,7 @@ module.exports = {
   reverseByteOrder,
   varIntBuffer,
   serializeScriptNumber,
+  coinbaseHeightScript,
   scriptPush,
   base58Decode,
   addressToScript,

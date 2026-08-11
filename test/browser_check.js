@@ -81,7 +81,7 @@ function check(name, cond, detail) {
 
     // Every readout must be filled in, not left as a placeholder.
     const placeholders = await page.evaluate(() => {
-      const ids = ['hr','fWorkers','fShares','fBlocks','fEta','nHeight','nDiff','nHash','cUrl','cUser'];
+      const ids = ['hr','fWorkers','fShares','fBlocks','fEta','nHeight','nDiff','nHash','cUrl','cUser','connectNote'];
       return ids.filter((id) => {
         const el = document.getElementById(id);
         return !el || el.textContent.trim() === '' || el.textContent.trim() === '—';

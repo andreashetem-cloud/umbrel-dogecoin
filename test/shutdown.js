@@ -91,8 +91,14 @@ const cfg = (extra) => ({
     };
     pool.send = (c, obj) => { replied = obj; };
     await pool.handleSubmit(fakeClient, { id: 9, params: ['w', 'nope', '00000000', '00000000', '00000000'] });
-    check('a submit during shutdown is refused, not silently dropped',
-      replied && replied.error && /shutting down/.test(replied.error[1]), JSON.stringify(replied));
+    // A submission during shutdown is VALIDATED, not refused. It can be the
+    // block, and the drain already waits for work in flight — so the only
+    // rejection it may earn is the one its own contents deserve.
+    check('a submit during shutdown is still judged on its merits',
+      replied && replied.error && /job not found/.test(replied.error[1]), JSON.stringify(replied));
+    check('it is not refused merely because the app is stopping',
+      !(replied && replied.error && /shutting down/.test(replied.error[1])), JSON.stringify(replied));
+    check('new connections are still turned away', pool.server === null || pool.draining === true);
     pool.stop();
     await sleep(150);
   }

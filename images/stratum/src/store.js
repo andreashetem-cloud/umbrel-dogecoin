@@ -20,7 +20,13 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const VERSION = 1;
+const VERSION = 2;
+
+// Older layouts this build can read and carry forward. A version that is merely
+// OLD is not worthless: v1 files hold months of a solo miner's history, and
+// "starting fresh" on an upgrade would throw exactly that away. Every field
+// added since is optional and defaults in adopt(), so the upgrade is lossless.
+const MIGRATABLE = new Set([1]);
 
 // 48 hours of one-minute samples, then 180 days of hourly averages. Enough to
 // see last night's dropout and last quarter's trend.
@@ -29,9 +35,36 @@ const HOUR_SAMPLES = 180 * 24;
 const SHARE_LOG = 600;
 const BLOCK_LOG = 50;
 const WORKER_HISTORY = 50;
+// Per-worker minute samples: 24 hours each. Enough to answer "which board died
+// last night", without multiplying the file by the number of workers that ever
+// connected — samples are dropped for workers that have been gone for a day.
+const WORKER_MINUTE_SAMPLES = 24 * 60;
+const WORKER_SAMPLE_TTL_MS = 24 * 3600 * 1000;
+// How many workers keep a per-minute series. Beyond this the file grows into
+// megabytes for history nobody looks at.
+// The total number of per-worker samples kept across ALL workers, and the floor
+// below which an individual series is never trimmed. 12000 samples is under
+// half a megabyte; the floor is four hours, which is still enough to see a
+// miner drop out this afternoon.
+const TOTAL_WORKER_SAMPLES = 12000;
+// A series shorter than this belongs to a worker that barely showed up. Once it
+// has been gone for TRANSIENT_TTL_MS its samples are dropped, so it stops
+// counting against the budget the established miners share.
+const TRANSIENT_SAMPLES = 30;
+const TRANSIENT_TTL_MS = 30 * 60 * 1000;
+const SHORT_SERIES_SAMPLES = 240;
 // How far back to look for an existing hourly bucket. A clock that steps
 // backwards must not open a duplicate bucket for an hour we already have.
 const BUCKET_LOOKBACK = 4;
+// A stored sample further ahead of the present than this is treated as the
+// product of a wrong clock and dropped, rather than being allowed to reject
+// every real sample that follows it.
+const CLOCK_STEP_TOLERANCE_S = 3600;
+// How long the incoming clock must disagree with the stored history before the
+// stored timeline is believed to be the wrong one. A quarter of an hour of
+// consistent disagreement — far longer than an NTP correction at boot takes,
+// and far shorter than a user would stare at a frozen chart.
+const RE_ANCHOR_AFTER_SECONDS = 15 * 60;
 
 function emptyState() {
   return {
@@ -45,8 +78,21 @@ function emptyState() {
     bestShareAt: null,
     minuteSamples: [], // [tsSeconds, hashrate]
     hourSamples: [], // [hourTsSeconds, meanHashrate, count]
-    shareLog: [], // [tsSeconds, shareDiff, stratumDifficulty]
-    workers: {},
+    // [tsSeconds, shareDiff, stratumDifficulty, workerName]. The name is stored
+    // in full rather than as an index into a side table: with a handful of
+    // workers the few kilobytes cost nothing, and an index that drifts out of
+    // step with its table silently mislabels every share in the chart.
+    shareLog: [],
+    // When the incoming clock first disagreed with the stored history, so the
+    // decision to re-anchor survives a restart.
+    disagreeingSince: null,
+    workersDisagreeingSince: null,
+    // A null-prototype map. Worker names arrive from the network, and on a
+    // plain object a worker called "__proto__" resolves to Object.prototype:
+    // the entry is never created, every write lands on the prototype, and from
+    // then on every object in the process inherits a bogus `accepted`. With no
+    // prototype there is nothing to reach.
+    workers: Object.create(null),
   };
 }
 
@@ -105,8 +151,12 @@ class Store {
       this.preserve('corrupt');
     } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const version = Number(parsed.version);
-      if (version === VERSION) {
+      if (version === VERSION || MIGRATABLE.has(version)) {
         this.adopt(parsed);
+        if (version !== VERSION) {
+          this.log(`stats file upgraded from version ${version} to ${VERSION}; nothing was discarded`);
+          this.dirty = true;
+        }
       } else if (version > VERSION) {
         // A downgrade. Writing here would destroy a newer, richer file, so the
         // store stays read-only and says why. Mining is unaffected.
@@ -149,7 +199,11 @@ class Store {
   // Copy a file we are about to stop using, so nothing is ever lost silently.
   preserve(suffix) {
     try {
-      const kept = `${this.path}.${suffix}`;
+      // Never reuse a name. A fixed `stats.json.corrupt` means the SECOND
+      // incident overwrites the archive of the first — and the first archive is
+      // the one holding months of history, while the second holds an hour.
+      let kept = `${this.path}.${suffix}`;
+      for (let n = 2; fs.existsSync(kept) && n < 1000; n++) kept = `${this.path}.${suffix}.${n}`;
       fs.renameSync(this.path, kept);
       this.log(`the previous file was kept as ${kept}`);
     } catch {
@@ -167,6 +221,17 @@ class Store {
     s.rejected = Math.max(0, Math.floor(num(parsed.rejected)));
     s.bestShareDiff = Math.max(0, num(parsed.bestShareDiff));
     s.bestShareAt = num(parsed.bestShareAt, null) || null;
+    // Clamped like every other stored number. A negative value would make the
+    // elapsed time enormous and re-anchor — deleting history — on the very
+    // first out-of-order sample, skipping the waiting period entirely.
+    const anchor = (v) => {
+      const n = num(v, null);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      const horizon = Math.round(Date.now() / 1000) + CLOCK_STEP_TOLERANCE_S;
+      return n > horizon ? null : n;
+    };
+    s.disagreeingSince = anchor(parsed.disagreeingSince);
+    s.workersDisagreeingSince = anchor(parsed.workersDisagreeingSince);
 
     for (const [k, v] of Object.entries(obj(parsed.rejectReasons))) {
       if (typeof k === 'string' && Number.isFinite(v)) s.rejectReasons[k.slice(0, 64)] = Math.floor(v);
@@ -181,16 +246,34 @@ class Store {
       .slice(-HOUR_SAMPLES);
     s.shareLog = arr(parsed.shareLog)
       .filter((p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+      // A v1 entry has no fourth element; it becomes an unattributed share
+      // rather than being dropped.
+      .map((p) => [p[0], p[1], Number.isFinite(p[2]) ? p[2] : 0,
+        typeof p[3] === 'string' ? p[3].slice(0, 64) : null])
       .slice(-SHARE_LOG);
-    for (const [name, w] of Object.entries(obj(parsed.workers))) {
+    // Bounded like every other collection here: a file with ten thousand worker
+    // entries would otherwise be loaded whole and only trimmed later.
+    for (const [name, w] of Object.entries(obj(parsed.workers)).slice(0, WORKER_HISTORY)) {
       if (!w || typeof w !== 'object') continue;
+      // Same reasoning as worker(): a file containing a worker literally called
+      // "__proto__" would otherwise replace the map's prototype on assignment.
+      // s.workers has none, so the assignment is an ordinary own property.
+      const reasons = {};
+      for (const [k, v] of Object.entries(obj(w.rejectReasons))) {
+        if (typeof k === 'string' && Number.isFinite(v)) reasons[k.slice(0, 64)] = Math.floor(v);
+      }
       s.workers[String(name).slice(0, 64)] = {
         accepted: Math.max(0, Math.floor(num(w.accepted))),
         rejected: Math.max(0, Math.floor(num(w.rejected))),
         bestShareDiff: Math.max(0, num(w.bestShareDiff)),
+        bestShareAt: num(w.bestShareAt, null) || null,
         firstSeen: num(w.firstSeen, Date.now()),
         lastSeen: num(w.lastSeen, Date.now()),
         work: Math.max(0, num(w.work)),
+        rejectReasons: reasons,
+        samples: arr(w.samples)
+          .filter((p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+          .slice(-WORKER_MINUTE_SAMPLES),
       };
     }
     this.state = s;
@@ -253,14 +336,18 @@ class Store {
       s.bestShareDiff = shareDiff;
       s.bestShareAt = at;
     }
-    s.shareLog.push([Math.round(at / 1000), shareDiff, stratumDifficulty]);
+    s.shareLog.push([Math.round(at / 1000), shareDiff, stratumDifficulty,
+      workerName ? String(workerName).slice(0, 64) : null]);
     while (s.shareLog.length > SHARE_LOG) s.shareLog.shift();
 
     const w = this.worker(workerName, at);
     w.accepted++;
     w.lastSeen = at;
     w.work += stratumDifficulty;
-    if (shareDiff > w.bestShareDiff) w.bestShareDiff = shareDiff;
+    if (shareDiff > w.bestShareDiff) {
+      w.bestShareDiff = shareDiff;
+      w.bestShareAt = at;
+    }
 
     this.trimWorkers();
     this.dirty = true;
@@ -276,6 +363,7 @@ class Store {
     if (workerName) {
       const w = this.worker(workerName, Date.now());
       w.rejected++;
+      w.rejectReasons[reason] = (w.rejectReasons[reason] || 0) + 1;
       w.lastSeen = Date.now();
       this.trimWorkers();
     }
@@ -284,12 +372,22 @@ class Store {
 
   worker(name, at) {
     const key = String(name || 'worker').slice(0, 64);
-    if (!this.state.workers[key]) {
+    // hasOwnProperty rather than a truthiness test: on any inherited key the
+    // lookup would succeed against the prototype and the entry would never be
+    // created. The map is null-prototype, but this must stay correct even if
+    // that ever changes.
+    if (!Object.prototype.hasOwnProperty.call(this.state.workers, key)) {
       this.state.workers[key] = {
-        accepted: 0, rejected: 0, bestShareDiff: 0, firstSeen: at, lastSeen: at, work: 0,
+        accepted: 0, rejected: 0, bestShareDiff: 0, bestShareAt: null,
+        firstSeen: at, lastSeen: at, work: 0, rejectReasons: {}, samples: [],
       };
     }
-    return this.state.workers[key];
+    // A worker restored from a v1 file has neither of the new fields; fill them
+    // in on first touch rather than checking for them at every use site.
+    const w = this.state.workers[key];
+    if (!w.rejectReasons) w.rejectReasons = {};
+    if (!Array.isArray(w.samples)) w.samples = [];
+    return w;
   }
 
   // The caller keeps its own record with the block hex on it; the store must
@@ -314,17 +412,185 @@ class Store {
     return true;
   }
 
+  // Per-worker hashrate, sampled alongside the combined figure. `perWorker` is
+  // a Map or plain object of name -> hashrate; workers that are connected but
+  // idle must appear with 0 rather than be omitted, otherwise a stalled miner
+  // leaves a gap in its chart that reads as "no data" instead of "stopped".
+  recordWorkerSamples(at, perWorker) {
+    if (!perWorker) return;
+    const s = this.state;
+    const ts = Math.round(at / 1000);
+    const entries = perWorker instanceof Map ? perWorker.entries() : Object.entries(perWorker);
+    let behind = 0;
+    for (const [name, hashrate] of entries) {
+      if (!Number.isFinite(hashrate)) continue;
+      const w = this.worker(name, at);
+      // A connected worker has been seen, even at zero hashrate. Without this
+      // its lastSeen only advances on shares, so a miner that is connected but
+      // producing nothing — the exact case a zero sample exists to record —
+      // ages out after 24 hours and has its series wiped on the same tick that
+      // wrote to it. It would also be first in line for eviction.
+      w.lastSeen = at;
+      const last = w.samples[w.samples.length - 1];
+      if (last && ts < last[0]) { behind++; continue; }
+      w.samples.push([ts, Math.round(hashrate)]);
+      while (w.samples.length > WORKER_MINUTE_SAMPLES) w.samples.shift();
+    }
+
+    // The same re-anchoring the combined series does, and for the same reason:
+    // a series left frozen at a future timestamp can never accept another
+    // sample, and pruneWorkerSamples' TTL cannot clear it either because the
+    // worker is still connected. Counted separately because a worker can be
+    // future-dated on its own — the process can die between writing the two.
+    if (behind > 0) {
+      if (!s.workersDisagreeingSince || s.workersDisagreeingSince > ts) {
+        s.workersDisagreeingSince = ts;
+        this.dirty = true;
+        this.save(true);
+      }
+      if (ts - s.workersDisagreeingSince >= RE_ANCHOR_AFTER_SECONDS) {
+        const horizon = ts + CLOCK_STEP_TOLERANCE_S;
+        for (const w of Object.values(this.state.workers)) {
+          if (Array.isArray(w.samples)) w.samples = w.samples.filter((p) => p[0] <= horizon);
+        }
+        this.log('re-anchored the per-worker history to the current time');
+        s.workersDisagreeingSince = null;
+      }
+    } else {
+      s.workersDisagreeingSince = null;
+    }
+    this.pruneWorkerSamples(at);
+    // Entries can be created here as well as by recordShare, so the cap has to
+    // be applied here too — MAX_CONNECTIONS is larger than WORKER_HISTORY.
+    this.trimWorkers();
+    this.dirty = true;
+  }
+
+  // Drop the sample series of workers that have been gone for a day. Their
+  // totals stay — that is the lifetime record — but a machine sold last month
+  // should not carry 1440 samples in every save for the rest of time.
+  pruneWorkerSamples(now) {
+    const named = Object.entries(this.state.workers);
+    for (const [, w] of named) {
+      if (w.samples && w.samples.length && now - (w.lastSeen || 0) > WORKER_SAMPLE_TTL_MS) {
+        w.samples = [];
+      }
+    }
+    // Only the most recently seen workers carry a series at all. Fifty workers
+    // times a day of minutes is a 1.6 MB file, and that file is stringified
+    // synchronously on the event loop — including on the block path. A handful
+    // of live miners is the real case; the rest keep their totals, which is
+    // what the lifetime record is for.
+    // A budget shared between the workers that have a series, rather than a
+    // cliff at a fixed number of them.
+    //
+    // Two earlier attempts were worse. Wiping the tail of a recency sort starved
+    // one arbitrary worker forever, because every connected worker is stamped
+    // with the SAME lastSeen on each pass and the sort is therefore all ties.
+    // Cutting everyone to a fixed short length the moment a ninth worker
+    // appeared meant a laptop connecting for a minute permanently discarded
+    // most of eight real miners' history. Dividing the budget degrades
+    // gradually: two miners keep a full day each, nine keep about twenty
+    // hours, fifty keep four.
+    // Drop the series of workers that appeared briefly and went away. Without
+    // this, a client that reconnects under a new name each time — or one
+    // afternoon of testing — leaves dozens of one-sample series behind, and
+    // the budget below is divided by all of them for a full day, cutting the
+    // real miners' history to the floor.
+    for (const [, w] of named) {
+      const brief = w.samples && w.samples.length > 0 && w.samples.length < TRANSIENT_SAMPLES;
+      if (brief && now - (w.lastSeen || 0) > TRANSIENT_TTL_MS) w.samples = [];
+    }
+
+    const withSamples = named.filter(([, w]) => w.samples && w.samples.length);
+    if (withSamples.length > 1) {
+      const each = Math.max(SHORT_SERIES_SAMPLES,
+        Math.floor(TOTAL_WORKER_SAMPLES / withSamples.length));
+      for (const [, w] of withSamples) {
+        while (w.samples.length > each) w.samples.shift();
+      }
+    }
+  }
+
   recordSample(at, hashrate) {
     const s = this.state;
     const ts = Math.round(at / 1000);
 
-    // Refuse a sample that goes backwards. A machine without a real-time clock
-    // steps its clock on every boot once NTP catches up, and a backwards step
-    // would otherwise plant duplicate buckets and scramble the chart's x-axis.
-    const lastMinute = s.minuteSamples[s.minuteSamples.length - 1];
+    // Clock steps. A machine without a real-time clock reads a wrong date at
+    // boot and NTP corrects it minutes later, in either direction.
+    //
+    // Simply refusing every sample older than the newest stored one is not
+    // enough: one reading a year in the future would then reject everything
+    // real for a year, freezing the chart permanently with no recovery short of
+    // deleting the history. So a stored sample that is implausibly far AHEAD of
+    // now is treated as the bogus one and discarded instead.
+    // Clock steps, and why this is not simply "trust the newer timestamp".
+    //
+    // Two situations produce a sample dated before the newest stored one, and
+    // they need opposite responses:
+    //
+    //   a) The clock is wrong NOW. A box with no real-time clock boots with
+    //      yesterday's date and NTP corrects it a minute later. The stored
+    //      history is right; the incoming sample is wrong. Deleting history
+    //      here would destroy months of records over one bad reading — which
+    //      is the more common case, and the more expensive mistake.
+    //
+    //   b) The clock was wrong WHEN A SAMPLE WAS WRITTEN, and is right now.
+    //      One reading a year in the future would otherwise reject every real
+    //      sample for a year, freezing the chart with no way back.
+    //
+    // They are indistinguishable from a single sample, so the tie is broken by
+    // persistence: (a) resolves itself within a couple of minutes, so history
+    // is only re-anchored after the same disagreement has repeated for
+    // RE_ANCHOR_AFTER_SECONDS of consistent disagreement. Nothing is deleted
+    // before then, and the clock at which it started is stored, so restarting
+    // does not reset the wait.
+    let lastMinute = s.minuteSamples[s.minuteSamples.length - 1];
     if (lastMinute && ts < lastMinute[0]) {
-      this.logError(`ignoring a sample dated ${lastMinute[0] - ts}s before the previous one (clock step?)`);
-      return;
+      // Recorded in the state, not in a counter on this object: a box that
+      // reboots every few minutes — `restart: on-failure` against a node that
+      // is not up yet, or someone power-cycling — would reset an in-memory
+      // count forever and never re-anchor, while the future-dated sample that
+      // needs clearing is on disk and survives every one of those restarts.
+      // Also revised DOWNWARD. Stamping it once and never lowering it means a
+      // second, smaller clock correction leaves the anchor in the frame of the
+      // first: the elapsed time goes negative and the chart can never
+      // re-anchor again — permanently, because this value is persisted.
+      if (!s.disagreeingSince || s.disagreeingSince > ts) {
+        s.disagreeingSince = ts;
+        // Persisted immediately. The only other save is a five-minute timer,
+        // and a box that keeps power-cycling — the exact case this survives a
+        // restart for — would otherwise lose the anchor every time.
+        this.dirty = true;
+        this.save(true);
+      }
+      const disagreedFor = ts - s.disagreeingSince;
+      if (disagreedFor < RE_ANCHOR_AFTER_SECONDS) {
+        // A constant message, so logError's de-duplication actually works: an
+        // interpolated delta changes every minute and would print 1440 lines a
+        // day, which is the flooding that de-duplication exists to prevent.
+        this.logError('ignoring a sample dated before the previous one (clock step?)');
+        return;
+      }
+      // The disagreement has held for long enough to believe the present.
+      const horizon = ts + CLOCK_STEP_TOLERANCE_S;
+      const dropped = s.minuteSamples.filter((p) => p[0] > horizon).length;
+      s.minuteSamples = s.minuteSamples.filter((p) => p[0] <= horizon);
+      s.hourSamples = s.hourSamples.filter((p) => p[0] <= horizon);
+      // Per-worker series share the timeline and would otherwise stay frozen
+      // at a future timestamp forever, with no TTL able to clear them.
+      for (const w of Object.values(s.workers)) {
+        if (Array.isArray(w.samples)) w.samples = w.samples.filter((p) => p[0] <= horizon);
+      }
+      this.log(
+        `the clock has been behind the stored history for ${Math.round(disagreedFor / 60)} minutes; ` +
+          `re-anchoring to the current time and discarding ${dropped} future-dated sample(s)`
+      );
+      s.disagreeingSince = null;
+      lastMinute = s.minuteSamples[s.minuteSamples.length - 1];
+      if (lastMinute && ts < lastMinute[0]) return;
+    } else {
+      s.disagreeingSince = null;
     }
 
     s.minuteSamples.push([ts, Math.round(hashrate)]);
@@ -360,4 +626,8 @@ class Store {
   }
 }
 
-module.exports = { Store, VERSION, MINUTE_SAMPLES, HOUR_SAMPLES, SHARE_LOG, BLOCK_LOG };
+module.exports = {
+  Store, VERSION, MIGRATABLE, MINUTE_SAMPLES, HOUR_SAMPLES, SHARE_LOG, BLOCK_LOG,
+  WORKER_MINUTE_SAMPLES, CLOCK_STEP_TOLERANCE_S,
+  TOTAL_WORKER_SAMPLES, SHORT_SERIES_SAMPLES, RE_ANCHOR_AFTER_SECONDS,
+};

@@ -155,5 +155,25 @@ eq('block version is carried through unmodified', job.version, 6422532);
 check('network target comes from the template, not recomputed',
   job.networkTarget === BigInt('0x' + template.target));
 
+console.log('\nthe BIP34 height push matches Dogecoin Core exactly');
+{
+  // Transcribed from src/script/script.h push_int64(), which is what
+  // src/validation.cpp compares the coinbase against:
+  //   if (n == -1 || (n >= 1 && n <= 16)) push_back(n + (OP_1 - 1));
+  //   else if (n == 0)                    push_back(OP_0);
+  //   else                                *this << CScriptNum::serialize(n);
+  const expected = {
+    0: '00', 1: '51', 3: '53', 16: '60', 17: '0111', 255: '02ff00', 6327333: '03258c60',
+  };
+  for (const [height, hex] of Object.entries(expected)) {
+    check(`height ${height} encodes as ${hex}`,
+      u.coinbaseHeightScript(Number(height)).toString('hex') === hex,
+      u.coinbaseHeightScript(Number(height)).toString('hex'));
+  }
+  // The case that used to be wrong: a single opcode, not a length-prefixed push.
+  check('small heights are a single opcode, not a data push',
+    u.coinbaseHeightScript(3).length === 1);
+}
+
 console.log(`\n${checks} checks, ${failures} failure(s)`);
 process.exit(failures === 0 ? 0 : 1);

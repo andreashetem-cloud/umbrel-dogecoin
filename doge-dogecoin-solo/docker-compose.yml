@@ -14,9 +14,14 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.1.0
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.2.0
     restart: on-failure
     logging: *default-logging
+    # Docker's default is 10 seconds, and the shutdown handler waits up to 130
+    # for a block that is still being submitted — including its retry schedule.
+    # Without this the app is SIGKILLed mid-submit on every app update, which is
+    # exactly the case that drain() was written to survive.
+    stop_grace_period: 5m
     volumes:
       # Statistics that survive a restart: shares, best share ever, hashrate
       # history, blocks found. Without this the dashboard can only ever describe
@@ -96,12 +101,69 @@ services:
       # of rejects that looks like failing hardware.
       DIFFICULTY_GRACE_SECONDS: "60"
       # How often each worker is pinged with client.get_version to measure the
-      # round-trip time. Miners that ignore the request simply show no latency.
+      # round-trip time. Firmware that ignores the request still gets a latency,
+      # measured from the subscribe/authorize handshake instead.
       PING_INTERVAL_SECONDS: "60"
-      # Set to 1 to ignore the address in a worker's username and pay every
-      # block to PAYOUT_ADDRESS instead. Worth doing if anyone you would not
-      # hand a block to can reach this port.
-      LOCK_PAYOUT_ADDRESS: "0"
+
+      # Ignore the address in a worker's username and pay EVERY block to
+      # PAYOUT_ADDRESS.
+      #
+      # On by default, and it should stay on unless you specifically want
+      # different miners paying different addresses. Stratum has no
+      # authentication: with this off, anyone who can reach port 22557 mines
+      # with your node's templates and puts their OWN address in the username,
+      # so the block your electricity found pays them. That is not theoretical
+      # — it was demonstrated against this app during review.
+      LOCK_PAYOUT_ADDRESS: "1"
+
+      # ---------------------------------------------------------------------
+      # Renting hashpower (NiceHash and similar)
+      #
+      # Only relevant if you forward port 22557 to the internet. Read the
+      # warning above twice before you do: LOCK_PAYOUT_ADDRESS must be "1", and
+      # the port is then reachable by everyone, not only the service you rented
+      # from. Firewall it to the source addresses you actually see in the log as
+      # soon as you know them.
+      #
+      # A rented order is thousands of times faster than a home miner, and the
+      # defaults above are sized for a home miner. Uncomment this block instead:
+      #
+      #   START_DIFFICULTY: "1048576"      # a 100 GH/s order starting at 2048
+      #                                    # submits 745 shares a SECOND and is
+      #                                    # disconnected by the rate limit
+      #                                    # before vardiff can react
+      #   MIN_DIFFICULTY: "65536"          # keeps a brief hashrate dip from
+      #                                    # dropping it back into that flood
+      #   MAX_DIFFICULTY: "268435456"      # the current cap silently pins a
+      #                                    # large order at 4x the intended
+      #                                    # share rate
+      #   MAX_MESSAGES_PER_10S: "1000"     # headroom for the initial ramp
+      #   MAX_CONNECTIONS: "256"           # an order arrives as many connections
+      #   MAX_CONNECTIONS_PER_IP: "256"    # ...all from a handful of their IPs,
+      #                                    # so the default 8 locks the order out
+      #   MAX_PAYOUT_VARIANTS: "1"         # belt and braces with the lock
+      #   DIFFICULTY_GRACE_SECONDS: "120"  # their aggregator applies difficulty
+      #                                    # changes slowly
+      #   SOCKET_TIMEOUT_SECONDS: "1800"   # a quiet connection at high
+      #                                    # difficulty must not be dropped
+      #   PING_INTERVAL_SECONDS: "300"     # they do not answer get_version
+      #   UV_THREADPOOL_SIZE: "8"          # scrypt verification runs on libuv's
+      #                                    # thread pool; the default is 4
+      #
+      # Two things stay true even with everything above set. Stratum has no
+      # accounts, so anyone who reaches the port can authorize under an existing
+      # worker's name and inflate that worker's share and reject counts — the
+      # statistics become untrustworthy, though with the payout locked no money
+      # moves. And connection slots are finite: a few hosts opening idle sockets
+      # can fill them and keep your real miners out. Both are reasons to
+      # firewall the port and to un-forward it the moment the order ends.
+      #
+      # Worth knowing before you spend anything: rented scrypt hashpower is
+      # priced off DOGE *and* Litecoin revenue combined, because everyone else
+      # merge-mines both on the same hashes. Pointing it at a DOGE-only node
+      # throws that half away, so the expected return is roughly 25% below what
+      # you pay. It buys a real end-to-end test and a lottery ticket, not profit.
+      # ---------------------------------------------------------------------
     healthcheck:
       test: ["CMD", "node", "-e", "require('node:http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s

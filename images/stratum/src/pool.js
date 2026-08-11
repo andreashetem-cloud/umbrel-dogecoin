@@ -18,7 +18,21 @@ const { Job, validateShareAsync, EXTRANONCE1_SIZE, EXTRANONCE2_SIZE } = require(
 const u = require('./util');
 
 const MAX_LINE_BYTES = 16 * 1024;
-const JOB_HISTORY = 6;
+// How many jobs stay valid. This is not about new blocks — those arrive by
+// longpoll and are announced with clean_jobs — but about REBUILDS: the template
+// is rebuilt whenever the coinbase value rises, which on a busy mempool is
+// every few seconds. At six, a job expired about thirty seconds after it was
+// issued, while the pool was still telling miners the older jobs were valid
+// (clean_jobs false). Work returning from a proxy or a rented aggregator is
+// routinely older than that, and such a share was rejected as "job not found"
+// WITHOUT ever being hashed — so a block-winning share would have been thrown
+// away unexamined. Sixty covers ten minutes of rebuilds.
+const JOB_HISTORY = 60;
+// How many superseded difficulty targets a client's in-flight work may still be
+// judged against.
+const RECENT_TARGETS = 4;
+// Connection-churn log lines allowed per minute before they are summarised.
+const CHURN_LOG_PER_MINUTE = 20;
 
 // Safety limits get defaults here rather than only in the caller. A limit that
 // silently becomes `undefined` compares false against everything, which turns
@@ -154,10 +168,19 @@ class Pool extends EventEmitter {
     this.sampleTimer = setInterval(() => {
       if (!this.store) return;
       let total = 0;
+      // Per worker as well, so one board dropping out is visible on its own
+      // line instead of as a dip in a combined figure that two other miners
+      // are still holding up. Same name key the store uses everywhere else.
+      const perWorker = new Map();
       for (const c of this.clients.values()) {
-        if (c.authorized) total += this.clientHashrate(c);
+        if (!c.authorized) continue;
+        const hr = this.clientHashrate(c);
+        total += hr;
+        perWorker.set(c.worker, (perWorker.get(c.worker) || 0) + hr);
       }
-      this.store.recordSample(Date.now(), total);
+      const at = Date.now();
+      this.store.recordSample(at, total);
+      this.store.recordWorkerSamples(at, perWorker);
     }, 60000);
     this.sampleTimer.unref();
 
@@ -314,9 +337,16 @@ class Pool extends EventEmitter {
     setTimeout(() => {
       if (client.pendingPing && client.pendingPing.id === id) {
         client.pendingPing = null;
-        // Clear it. Showing the last good round-trip for a link that has since
-        // gone quiet hides the very condition this number exists to surface.
-        client.latencyMs = null;
+        if (client.supportsGetVersion) {
+          // This miner does answer, so silence means the link went quiet —
+          // exactly what this number exists to surface. Showing the last good
+          // round-trip would hide it.
+          client.latencyMs = null;
+          client.latencyFrom = null;
+        }
+        // Firmware that never answers keeps its handshake estimate. Wiping it
+        // every 30 seconds is what left this column empty for both of the
+        // miners actually connected to this pool.
       }
     }, 15000).unref();
   }
@@ -351,14 +381,49 @@ class Pool extends EventEmitter {
     return h.reduce((a, b) => a + b, 0) / h.length;
   }
 
+  // Two hazards, not one. Emitting 'error' with no listener THROWS in Node, and
+  // a listener that throws propagates into whatever called emit — which on the
+  // block path is the code submitting the block. Guarding only the first, which
+  // this used to do, left the comments at the call sites promising a protection
+  // that did not exist.
   emitSafely(event, payload) {
-    if (this.listenerCount(event) > 0) this.emit(event, payload);
-    else this.log(`${event}: ${payload && payload.message ? payload.message : payload}`);
+    if (this.listenerCount(event) === 0) {
+      this.log(`${event}: ${payload && payload.message ? payload.message : payload}`);
+      return;
+    }
+    try {
+      this.emit(event, payload);
+    } catch (err) {
+      this.log(`a ${event} listener threw (${err.message}); continuing`);
+    }
   }
 
   log(msg) {
     // eslint-disable-next-line no-console
     console.log(`[pool] ${msg}`);
+  }
+
+  // For lines an unauthenticated peer can cause: connections, disconnections,
+  // refusals. Connect-and-drop in a loop otherwise writes tens of megabytes a
+  // second into the container log, which fills the disk and — worse — pushes
+  // out the BLOCK HEX line that is the last resort for recovering a block.
+  // Beyond the budget the lines are counted and summarised once a minute.
+  churnLog(msg) {
+    const now = Date.now();
+    if (!this.churnWindowAt || now - this.churnWindowAt >= 60000) {
+      if (this.churnSuppressed) {
+        this.log(`(${this.churnSuppressed} more connection events in the last minute)`);
+      }
+      this.churnWindowAt = now;
+      this.churnCount = 0;
+      this.churnSuppressed = 0;
+    }
+    if (this.churnCount < CHURN_LOG_PER_MINUTE) {
+      this.churnCount++;
+      this.log(msg);
+    } else {
+      this.churnSuppressed = (this.churnSuppressed || 0) + 1;
+    }
   }
 
   // ---------------------------------------------------------------- templates
@@ -491,7 +556,7 @@ class Pool extends EventEmitter {
     // authenticate against. That makes an unbounded connection count a trivial
     // resource-exhaustion path for anyone on the LAN, so it gets a ceiling.
     if (this.clients.size >= this.config.maxConnections) {
-      this.log(`refused a connection from ${socket.remoteAddress}: at the ${this.config.maxConnections}-connection limit`);
+      this.churnLog(`refused a connection from ${socket.remoteAddress}: at the ${this.config.maxConnections}-connection limit`);
       socket.destroy();
       return;
     }
@@ -503,7 +568,7 @@ class Pool extends EventEmitter {
     let fromThisHost = 0;
     for (const c of this.clients.values()) if (c.remote === remote) fromThisHost++;
     if (fromThisHost >= this.config.maxConnectionsPerIp) {
-      this.log(`refused a connection from ${remote}: already has ${fromThisHost}`);
+      this.churnLog(`refused a connection from ${remote}: already has ${fromThisHost}`);
       socket.destroy();
       return;
     }
@@ -528,6 +593,15 @@ class Pool extends EventEmitter {
       accepted: 0,
       rejected: 0,
       bestShareDiff: 0,
+      // Round-trip time and where it came from. 'ping' is a real measurement
+      // from client.get_version; 'handshake' is the subscribe->authorize gap,
+      // which every miner produces but which also contains the miner's own
+      // processing time, so it is an upper bound and is labelled as such.
+      latencyMs: null,
+      latencyFrom: null,
+      supportsGetVersion: false,
+      subscribeRepliedAt: null,
+      rejectReasons: {},
       buffer: '',
       rateWindowAt: Date.now(),
       rateCount: 0,
@@ -568,7 +642,7 @@ class Pool extends EventEmitter {
     socket.on('close', () => {
       clearTimeout(client.handshakeTimer);
       this.clients.delete(id);
-      this.log(`worker disconnected: ${client.worker || 'unauthorized'} (#${id})`);
+      this.churnLog(`worker disconnected: ${client.worker || 'unauthorized'} (#${id})`);
     });
   }
 
@@ -645,6 +719,11 @@ class Pool extends EventEmitter {
     if (msg.method === undefined) {
       if (client.pendingPing && msg.id === client.pendingPing.id) {
         client.latencyMs = Date.now() - client.pendingPing.sentAt;
+        client.latencyFrom = 'ping';
+        // Remembered so a later timeout can tell "this miner answers and has
+        // gone quiet" (report nothing) from "this miner never answers"
+        // (keep the handshake estimate).
+        client.supportsGetVersion = true;
         client.pendingPing = null;
       }
       return;
@@ -687,6 +766,9 @@ class Pool extends EventEmitter {
       client.extranonce1.toString('hex'),
       EXTRANONCE2_SIZE,
     ]);
+    // Stamped AFTER the write, so the interval measured against the authorize
+    // that follows is the link, not our own serialisation.
+    client.subscribeRepliedAt = Date.now();
   }
 
   handleAuthorize(client, msg) {
@@ -700,8 +782,28 @@ class Pool extends EventEmitter {
       return;
     }
 
+    // The only round-trip every miner produces. Firmware sends authorize the
+    // moment it has our subscribe reply, so this gap is the link plus a little
+    // parsing. Both of this user's miners ignore client.get_version, and a
+    // permanently empty column is worse than an honest upper bound.
+    if (client.subscribeRepliedAt && client.latencyMs == null) {
+      const rtt = Date.now() - client.subscribeRepliedAt;
+      // Beyond a second the miner was doing something else, not waiting on the
+      // network, and the number would be a lie.
+      if (rtt >= 0 && rtt <= 1000) {
+        client.latencyMs = rtt;
+        client.latencyFrom = 'handshake';
+      }
+    }
+
     const [username] = msg.params || [];
-    client.worker = String(username || 'worker').slice(0, 64);
+    // Control characters stripped, not just length-bounded. A name containing a
+    // newline lets anyone who can reach this port write forged lines into the
+    // container log — including a convincing "BLOCK ACCEPTED" — and the same
+    // string is stored and served to the dashboard.
+    client.worker = String(username || 'worker')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .slice(0, 64) || 'worker';
     client.authorized = true;
     client.payoutScript = null;
     client.payoutAddress = null;
@@ -750,7 +852,7 @@ class Pool extends EventEmitter {
     }
 
     this.reply(client, msg.id, true);
-    this.log(
+    this.churnLog(
       `worker connected: ${client.worker} (#${client.id}) from ${client.remote}` +
         (client.payoutAddress ? ` paying ${client.payoutAddress}` : '')
     );
@@ -778,6 +880,7 @@ class Pool extends EventEmitter {
       client.previousTarget = client.target;
       client.previousDifficulty = client.difficulty;
       client.previousTargetUntil = Date.now() + this.config.difficultyGraceMs;
+      this.rememberTarget(client, client.target);
     }
     client.difficulty = difficulty;
     // Stratum space, with the scrypt 2^16 multiplier — not consensus space.
@@ -799,11 +902,11 @@ class Pool extends EventEmitter {
     if (!client.authorized) {
       return this.reply(client, msg.id, null, [24, 'unauthorized worker', null]);
     }
-    if (this.draining) {
-      // Shutting down. Refusing now is honest and lets the drain finish; the
-      // miner reconnects to the new process in a second.
-      return this.reply(client, msg.id, null, [20, 'server is shutting down', null]);
-    }
+    // Deliberately NOT refused during shutdown. A submission that arrives after
+    // beginShutdown() can still be the block, and the drain already waits for
+    // work in flight — so validating it costs a moment and refusing it could
+    // cost the whole point of the app. Only new CONNECTIONS are turned away.
+
     const [, jobId, extranonce2, ntime, nonce] = msg.params || [];
     const job = this.jobs.get(jobId);
     if (!job) {
@@ -814,10 +917,12 @@ class Pool extends EventEmitter {
     // Must be the exact same job object the client was notified with.
     const effectiveJob = this.clientJob(client, job);
 
-    const targets = [client.target];
-    if (client.previousTarget && Date.now() < client.previousTargetUntil) {
-      targets.push(client.previousTarget);
-    }
+    // Every target this client has recently been told to use, not just the last
+    // one: vardiff can climb several steps within a second on a fast miner, and
+    // work queued at the first of them is still legitimately in flight.
+    const targets = Date.now() < client.previousTargetUntil
+      ? this.recentTargets(client)
+      : [client.target];
 
     // Asynchronous on purpose: scrypt is expensive by design, and anyone who
     // reaches this port can ask for it. Running it on the event loop would let
@@ -914,8 +1019,32 @@ class Pool extends EventEmitter {
     return variant;
   }
 
+  // Targets this client has recently been given. A single "previous target" is
+  // not enough while vardiff is ramping: a rented miner climbs several steps in
+  // a couple of seconds, and work already queued at the older difficulty is
+  // then judged against a target several steps harder and rejected as a low
+  // difficulty share. Keeping a few is honest — the miner really was told to
+  // use them — and costs nothing, because share difficulty has no bearing on
+  // whether a block is found.
+  recentTargets(client) {
+    const list = [client.target];
+    for (const t of client.previousTargets || []) list.push(t);
+    return list;
+  }
+
+  rememberTarget(client, target) {
+    if (!client.previousTargets) client.previousTargets = [];
+    client.previousTargets.unshift(target);
+    while (client.previousTargets.length > RECENT_TARGETS) client.previousTargets.pop();
+  }
+
   countReject(client, reason) {
     client.rejected++;
+    // Per worker as well as in total: "8 rejected" across the pool does not say
+    // which board is producing them, and stale shares from one slow miner need
+    // a different answer than bad shares from a failing one.
+    if (!client.rejectReasons) client.rejectReasons = {};
+    client.rejectReasons[reason] = (client.rejectReasons[reason] || 0) + 1;
     this.stats.rejected++;
     this.stats.rejectReasons[reason] = (this.stats.rejectReasons[reason] || 0) + 1;
     if (this.store) this.store.recordReject(reason, client.worker);
@@ -970,17 +1099,37 @@ class Pool extends EventEmitter {
     };
     this.stats.blocks.unshift(record);
     if (this.stats.blocks.length > 50) this.stats.blocks.pop();
+
+    // The full block hex, FIRST — before the store, before any listener, before
+    // the submission. A dying SD card can hold fsync for tens of seconds or
+    // forever, and this line is the difference between a recoverable situation
+    // and 10,000 DOGE gone. It must not depend on a disk that may be failing.
+    console.log(`[pool] BLOCK HEX height=${job.height} ${result.blockHex}`);
+
     if (this.store) {
       // The store keeps a copy WITHOUT the block hex: fifty mainnet blocks of
       // hex is tens of megabytes, and the file is serialised synchronously.
+      //
+      // Saved here, before the submission, and deliberately so.
+      //
+      // Deferring it to a setImmediate after the submit call looks like it
+      // takes the fsync off the critical path. Measured, it does not: the
+      // check phase runs before the poll phase that actually writes the RPC
+      // request to the socket, so the submission left at the same moment
+      // either way — while the record spent that window existing only in
+      // memory, where a crash loses the hash that reconciliation needs.
+      // Same latency, strictly less durability, so: save first.
       this.store.recordBlock(record);
-      this.store.save(true); // a block is not something to leave unsaved
+      this.store.save(true);
     }
+    // Announced the moment it is found, not when the node has confirmed it.
+    // Submission and its retry schedule can take a minute or more, and if it
+    // ultimately fails this is the only notification that will ever be sent.
+    // The later 'block' event replaces the notification rather than adding one.
+    // emitSafely: a listener that throws here would otherwise abort the
+    // submission entirely.
+    this.emitSafely('blockfound', record);
 
-    // The full block hex, written out before the first attempt. If every
-    // retry below somehow fails, this line in the container log is the
-    // difference between a recoverable situation and 10,000 DOGE gone.
-    console.log(`[pool] BLOCK HEX height=${job.height} ${result.blockHex}`);
     record.blockHex = result.blockHex;
 
     try {
@@ -1003,7 +1152,10 @@ class Pool extends EventEmitter {
           this.store.save(true);
         }
         this.log(`BLOCK ACCEPTED at height ${job.height} — ${result.blockHash}`);
-        this.emit('block', record);
+        // Also guarded: this call sits inside the try that decides the
+        // block's fate, so a throwing listener would land in the catch below
+        // and rewrite an ACCEPTED block to "error" — on disk.
+        this.emitSafely('block', record);
       } else if (verdict.includes('inconclusive')) {
         record.status = 'stale';
         record.accepted = false;
@@ -1106,6 +1258,8 @@ class Pool extends EventEmitter {
         connectedAt: c.connectedAt,
         lastShareAt: c.lastShareAt,
         latencyMs: c.latencyMs == null ? null : c.latencyMs,
+        latencyFrom: c.latencyFrom || null,
+        rejectReasons: { ...(c.rejectReasons || {}) },
         // Recent share timestamps, so the dashboard can show the rhythm of a
         // worker rather than just a number. A miner that stalled two minutes
         // ago looks identical to a healthy one on an averaged hashrate.
@@ -1117,6 +1271,7 @@ class Pool extends EventEmitter {
       chain: this.chain,
       stratumPort: this.config.stratumPort,
       payoutAddress: this.config.payoutAddress,
+      lockPayoutAddress: !!this.config.lockPayoutAddress,
       startedAt: this.stats.startedAt,
       height: job ? job.height : null,
       networkDifficulty: job ? job.networkDifficulty : null,

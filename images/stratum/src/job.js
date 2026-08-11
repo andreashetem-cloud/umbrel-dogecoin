@@ -67,7 +67,7 @@ class Job {
 
   _buildCoinbase(payoutScript, tag) {
     // BIP34: the coinbase scriptSig must begin with a push of the block height.
-    const heightPush = u.scriptPush(u.serializeScriptNumber(this.height));
+    const heightPush = u.coinbaseHeightScript(this.height);
     const auxFlags = Buffer.from(
       (this.template.coinbaseaux && this.template.coinbaseaux.flags) || '',
       'hex'
@@ -206,9 +206,14 @@ function prepareShare(job, {
   // their own clocks; after a few minutes every share is refused locally,
   // including one that met the network target. Outside these bounds the block
   // really would be invalid, so nothing valid can be lost here.
-  if (ntime > Math.floor(Date.now() / 1000) + 7200) {
-    return { ok: false, reason: 'ntime beyond the 2-hour consensus limit' };
-  }
+  //
+  // Note this is checked against OUR wall clock, which is why it does not
+  // reject outright: the flag is carried through and only applied in
+  // judgeShare, after the proof of work is known. A container whose clock runs
+  // behind the miner's would otherwise discard a share that consensus accepts
+  // — and if that share met the network target, the block would be gone
+  // without ever having been hashed.
+  const ntimeTooFarAhead = ntime > Math.floor(Date.now() / 1000) + 7200;
 
   const nonce = parseInt(nonceHex, 16);
   const dedupeKey = `${extranonce1.toString('hex')}:${extranonce2Hex}:${ntimeHex}:${nonceHex}`;
@@ -232,7 +237,7 @@ function prepareShare(job, {
   const merkleRoot = u.merkleRootFromSteps(coinbaseHash, job.merkleSteps);
   const header = job.buildHeader(merkleRoot, ntime, nonce);
 
-  return { ok: true, coinbase, header };
+  return { ok: true, coinbase, header, ntimeTooFarAhead };
 }
 
 // Turn a proof-of-work hash into a verdict. `shareTargets` may hold more than
@@ -247,6 +252,15 @@ function judgeShare(job, prepared, powHash, shareTargets) {
   const isBlockCandidate = powValue <= job.networkTarget;
   const targets = Array.isArray(shareTargets) ? shareTargets : [shareTargets];
   const meetsShareTarget = targets.some((t) => t != null && powValue <= t);
+
+  // The ntime bound is applied HERE, after the work is known, and never to a
+  // block candidate. If the hash meets the network target, the node is the
+  // right authority on whether the timestamp is acceptable — not this
+  // container's clock, which may simply be running behind the miner's.
+  // Anything else risks throwing a real block away over a few seconds of drift.
+  if (prepared.ntimeTooFarAhead && !isBlockCandidate) {
+    return { ok: false, reason: 'ntime beyond the 2-hour consensus limit', shareDiff };
+  }
 
   if (!isBlockCandidate && !meetsShareTarget) {
     return { ok: false, reason: 'low difficulty share', shareDiff };
@@ -281,6 +295,11 @@ module.exports = {
   Job,
   validateShare,
   validateShareAsync,
+  // Exported so the verdict logic can be tested directly: the branch that
+  // decides whether a block candidate survives an out-of-bounds ntime is not
+  // reachable through a real miner without a wrong clock.
+  prepareShare,
+  judgeShare,
   EXTRANONCE1_SIZE,
   EXTRANONCE2_SIZE,
 };

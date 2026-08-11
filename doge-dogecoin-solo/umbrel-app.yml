@@ -2,7 +2,7 @@ manifestVersion: 1
 id: doge-dogecoin-solo
 category: bitcoin
 name: Dogecoin Solo Mining
-version: "1.1.0"
+version: "1.2.0"
 tagline: Point your scrypt miners at your own Dogecoin node
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -52,6 +52,25 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  Every worker now has its own page: tap one in the table to see its own hashrate chart over the last
+  day, its best share, how much work it has done, and why any of its shares were rejected. Best share
+  and difficulty are shown per device, and on a phone they appear under the worker's name instead of
+  being hidden with the columns that do not fit.
+
+
+  Round-trip time is now measured during the handshake, so miners whose firmware ignores
+  client.get_version finally report a latency instead of a dash. A warning appears as soon as a miner
+  stops submitting or drops far below its own 24-hour average, so a dead hashboard is visible without
+  watching the page. Optional push notifications will tell you about a block with the screen off,
+  over an https address.
+
+
+  Fixes: a malformed HTTP request could stop the app, which would have cost a block that was being
+  submitted at that moment; the app is now given time to finish submitting during an update instead of
+  being killed after ten seconds; and a wrong system clock at boot can no longer freeze or erase the
+  hashrate history.
+
+
   Statistics now survive a restart: shares, best share, hashrate history and blocks found are kept on
   disk instead of only in memory. Adds hashrate charts over hours and months, the odds of a block over
   a day, month and year, a luck figure comparing shares found against shares expected, round-trip

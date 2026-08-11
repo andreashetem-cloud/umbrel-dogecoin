@@ -106,6 +106,7 @@ h2 .aside{font-size:11px;letter-spacing:.06em;text-transform:none;color:var(--di
 /* ---------- charts ---------- */
 .chart{background:var(--panel);border:1px solid var(--line-soft);padding:14px 16px 10px}
 .chart + .chart{margin-top:14px}
+
 .chart .ctop{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
 .chart .ctitle{font:11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--dimmer)}
 .chart .cnote{font:11.5px/1.4 var(--mono);color:var(--dim)}
@@ -115,6 +116,23 @@ svg{display:block;width:100%;height:auto;min-height:130px}
 .series{fill:none;stroke:var(--gold);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
 .series-area{fill:rgba(194,166,51,.10);stroke:none}
 .dot{fill:var(--gold-dim)}
+
+/* ---------- notifications ---------- */
+.push{background:var(--panel);border:1px solid var(--line-soft);padding:15px 16px}
+.push p{margin:0;font-size:13.5px}
+.pushbtns{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.pushbtns button:not([hidden]){display:inline-block}
+.push .empty{padding:10px 0 0}
+
+/* ---------- one worker in detail ---------- */
+.wdetail{margin-top:18px;border:1px solid var(--gold-dim);background:var(--panel);padding:16px}
+.wdhead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}
+.wdname{font:500 15px/1.3 var(--mono);word-break:break-all}
+.wdsub{font:11.5px/1.5 var(--mono);color:var(--dimmer);margin-top:4px;word-break:break-all}
+.wdgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;
+  background:var(--line-soft);border:1px solid var(--line-soft);margin-bottom:14px}
+.wdetail .foot{margin-top:10px;font-size:12.5px;color:var(--dim)}
+.wdetail table{margin-top:12px}
 .dot.best{fill:var(--gold-bright)}
 .target-line{stroke:var(--bad);stroke-width:1;stroke-dasharray:3 3}
 .tabs{display:flex;gap:6px}
@@ -129,6 +147,14 @@ td{padding:13px 12px 13px 0;border-top:1px solid var(--line-soft);vertical-align
 td.num{font-family:var(--mono);font-size:13.5px}
 .wname{font-family:var(--mono);font-size:13.5px;word-break:break-all}
 .wsub{font:11.5px/1.5 var(--mono);color:var(--dimmer);margin-top:3px;word-break:break-all}
+/* Everything the hidden columns would have said, on one line. Shown only at
+   phone width, where those columns are not rendered. */
+.wmeta{display:none;font:11.5px/1.5 var(--mono);color:var(--dim);margin-top:4px}
+.wwarn{font:11.5px/1.5 var(--mono);margin-top:4px}
+.wwarn.warn{color:var(--warn)} .wwarn.bad{color:var(--bad)}
+.wrow{cursor:pointer}
+.wrow:hover td,.wrow:focus-visible td{background:var(--panel)}
+.wrow:focus-visible{outline:2px solid var(--gold);outline-offset:-2px}
 .unit{font:11.5px/1.5 var(--mono);color:var(--dimmer)}
 
 .spark{display:flex;align-items:flex-end;gap:2px;height:22px;min-width:90px}
@@ -167,6 +193,7 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
 @media (max-width:640px){
   body{padding:18px 14px 48px}
   th.hide,td.hide{display:none}
+  .wmeta{display:block}
   .figs{grid-template-columns:repeat(2,1fr)}
   /* At phone width the 700-unit viewBox scales 9px axis text down to under
      4 real pixels, which is a grey smudge. Grow the type instead. */
@@ -262,13 +289,45 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
   <h2>Workers</h2>
   <div id="workers"></div>
 
+  <!-- Detail for one worker. Hidden until a row is chosen; its history is
+       fetched on demand so the polling payload stays small. -->
+  <section class="wdetail" id="wdetail" hidden aria-live="polite">
+    <div class="wdhead">
+      <div>
+        <div class="wdname" id="wdName">—</div>
+        <div class="wdsub" id="wdSub"></div>
+      </div>
+      <button type="button" id="wdClose">Close</button>
+    </div>
+    <div class="wdgrid">
+      <div class="fig"><div class="k">Best share</div><div class="v" id="wdBest">—</div><div class="s" id="wdBestSub"></div></div>
+      <div class="fig"><div class="k">Shares</div><div class="v" id="wdShares">—</div><div class="s" id="wdSharesSub"></div></div>
+      <div class="fig"><div class="k">Work done</div><div class="v" id="wdWork">—</div><div class="s">blocks' worth, lifetime</div></div>
+      <div class="fig"><div class="k">Known since</div><div class="v" id="wdSince">—</div><div class="s" id="wdSinceSub"></div></div>
+    </div>
+    <div class="chart"><svg id="wdChart" viewBox="0 0 700 180" preserveAspectRatio="none" role="img" aria-label="Hashrate of this worker over the last 24 hours"></svg></div>
+    <p class="foot" id="wdChartFoot"></p>
+    <div id="wdRejects"></div>
+  </section>
+
+  <h2>Notifications <span class="aside" id="pushAside"></span></h2>
+  <div class="push" id="pushBox">
+    <p id="pushState">Checking…</p>
+    <div class="pushbtns">
+      <button type="button" id="pushEnable" hidden>Notify me when a block is found</button>
+      <button type="button" id="pushDisable" hidden>Turn off</button>
+      <button type="button" id="pushTest" hidden>Send a test</button>
+    </div>
+    <p class="empty" id="pushHelp"></p>
+  </div>
+
   <h2>Connect a miner</h2>
   <div class="kv">
     <div class="r"><span class="k">Stratum URL</span><span class="v" id="cUrl">—</span><button data-copy="cUrl">Copy</button></div>
     <div class="r"><span class="k">Username</span><span class="v" id="cUser">—</span><button data-copy="cUser">Copy</button></div>
     <div class="r"><span class="k">Password</span><span class="v">x</span><button data-copy-text="x">Copy</button></div>
   </div>
-  <p class="empty">Put a Dogecoin address in the username field and any block that worker finds pays that address. Anything else falls back to the address configured for this app. The password is ignored — miners insist on one, so send anything.</p>
+  <p class="empty" id="connectNote"></p>
 
   <h2>Network</h2>
   <div class="kv">
@@ -301,6 +360,17 @@ function hashrate(h){
   let i = 0, v = h;
   while(v >= 1000 && i < units.length - 1){ v /= 1000; i++; }
   return {n: v >= 100 ? v.toFixed(1) : v.toFixed(2), u: units[i]};
+}
+// Whole things that were counted, not measured. compact() is built for
+// difficulties and renders 24 shares as "24.00", which reads like a
+// measurement with two decimals of precision behind it.
+function count(n){
+  if(n == null || !isFinite(n)) return '—';
+  const v = Math.round(n);
+  if(v < 10000) return v.toLocaleString('en-US');
+  if(v < 1e6) return (v/1e3).toFixed(2)+'k';
+  if(v < 1e9) return (v/1e6).toFixed(2)+'M';
+  return (v/1e9).toFixed(2)+'G';
 }
 function compact(n){
   if(n == null || !isFinite(n)) return '—';
@@ -339,6 +409,13 @@ function since(ts){
   if(s < 86400) return Math.round(s/3600)+'h';
   return Math.round(s/86400)+'d';
 }
+// Worker names arrive from the network and are used in an attribute selector.
+// CSS.escape is not available everywhere this may run, so fall back to escaping
+// the characters that can break out of a quoted attribute selector.
+function cssEscape(value){
+  if(window.CSS && CSS.escape) return CSS.escape(value);
+  return String(value).replace(/["\\]/g, '\\$&');
+}
 function esc(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -366,6 +443,287 @@ document.addEventListener('click',(e)=>{
   const el = $(btn.getAttribute('data-copy'));
   if(el) copy(el.textContent, btn);
 });
+
+// Every worker currently in trouble, worst first, for the banner at the top of
+// the page. The per-row line says the same thing where the worker is; this is
+// what you see without scrolling.
+function workerAlarms(workers){
+  const out = [];
+  for(const w of workers || []){
+    const h = workerHealth(w);
+    if(h.level !== 'ok') out.push({ worker: w.worker, level: h.level, text: h.text });
+  }
+  return out.sort((a, b) => (a.level === 'bad' ? -1 : 1) - (b.level === 'bad' ? -1 : 1));
+}
+
+/* ---------- notifications ---------- */
+
+// A push notification needs three things the browser will only grant over
+// HTTPS: a service worker, the Push API, and a secure context. Over plain http
+// the honest thing is to say exactly which one is missing and how to fix it,
+// rather than showing a button that fails when pressed.
+const pushUI = {
+  state: $('pushState'), help: $('pushHelp'), aside: $('pushAside'),
+  enable: $('pushEnable'), disable: $('pushDisable'), test: $('pushTest'),
+};
+
+function pushSupport(){
+  if(!window.isSecureContext) return { ok:false, why:'insecure' };
+  if(!('serviceWorker' in navigator)) return { ok:false, why:'no service worker' };
+  if(!('PushManager' in window)) return { ok:false, why:'no push support' };
+  if(!('Notification' in window)) return { ok:false, why:'no notifications' };
+  return { ok:true };
+}
+
+function b64ToUint8(base64){
+  const padded = base64.replace(/-/g,'+').replace(/_/g,'/') + '==='.slice((base64.length + 3) % 4);
+  const raw = atob(padded);
+  const out = new Uint8Array(raw.length);
+  for(let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function currentSubscription(){
+  const reg = await navigator.serviceWorker.getRegistration();
+  if(!reg) return null;
+  return reg.pushManager.getSubscription();
+}
+
+function setPushUI(text, help, buttons){
+  pushUI.state.textContent = text;
+  pushUI.help.textContent = help || '';
+  pushUI.enable.hidden = !buttons.includes('enable');
+  pushUI.disable.hidden = !buttons.includes('disable');
+  pushUI.test.hidden = !buttons.includes('test');
+}
+
+async function refreshPushUI(){
+  try{
+    await refreshPushUIInner();
+  }catch(err){
+    // getRegistration() rejects outright when the browser is blocking storage
+    // for this origin. Without this the panel would sit on "Checking…" forever,
+    // which is precisely the silent failure it exists to prevent.
+    setPushUI('Notifications cannot be set up in this browser: ' + err.message,
+      'This usually means cookies or site data are blocked for this address.', []);
+  }
+}
+
+async function refreshPushUIInner(){
+  const support = pushSupport();
+  if(!support.ok){
+    pushUI.aside.textContent = 'unavailable over http';
+    setPushUI(
+      'Your browser will not allow notifications on this page.',
+      support.why === 'insecure'
+        ? 'Notifications need an https address. On Umbrel with Tailscale, run `sudo tailscale serve --bg ' + location.port + '` once on the Umbrel and open the https address it prints; this page will then offer to enable them. Everything else on this dashboard works exactly as it does now.'
+        : 'This browser does not support the Push API.',
+      []);
+    return;
+  }
+
+  let server;
+  try{
+    server = await (await fetch('/api/push/key', {cache:'no-store'})).json();
+  }catch(e){
+    setPushUI('Cannot reach the app to set up notifications.', '', []);
+    return;
+  }
+  if(!server.ok){
+    pushUI.aside.textContent = 'unavailable';
+    setPushUI('Notifications are switched off.', server.error || '', []);
+    return;
+  }
+
+  const sub = await currentSubscription();
+  if(sub){
+    pushUI.aside.textContent = 'on';
+    setPushUI('This device will be notified when a block is found.',
+      'It works with the screen off and the browser closed. The notification is built when it arrives, so it shows whether your node has accepted the block.',
+      ['disable','test']);
+  } else if(Notification.permission === 'denied'){
+    pushUI.aside.textContent = 'blocked';
+    setPushUI('This browser is blocking notifications for this page.',
+      'Allow them in the site settings for this address, then reload.', []);
+  } else {
+    pushUI.aside.textContent = 'off';
+    setPushUI('This device is not being notified.',
+      'A block at solo difficulty is a rare event; this is the one thing worth interrupting you for.',
+      ['enable']);
+  }
+}
+
+async function enablePush(){
+  setPushUI('Asking your browser for permission…', '', []);
+  try{
+    const permission = await Notification.requestPermission();
+    if(permission !== 'granted'){ await refreshPushUI(); return; }
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const server = await (await fetch('/api/push/key', {cache:'no-store'})).json();
+    if(!server.ok || !server.key) throw new Error(server.error || 'no key available');
+    const sub = await reg.pushManager.subscribe({
+      // Chrome refuses a subscription without this, and a push service will not
+      // deliver a payloadless message to a non-userVisibleOnly subscription.
+      userVisibleOnly: true,
+      applicationServerKey: b64ToUint8(server.key),
+    });
+    const res = await fetch('/api/push/subscribe', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    });
+    if(!res.ok) throw new Error('the app refused the subscription');
+    await refreshPushUI();
+  }catch(err){
+    setPushUI('Could not enable notifications: ' + err.message, '', ['enable']);
+  }
+}
+
+async function disablePush(){
+  try{
+    const sub = await currentSubscription();
+    if(sub){
+      await fetch('/api/push/unsubscribe', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ endpoint: sub.endpoint }),
+      });
+      await sub.unsubscribe();
+    }
+  }catch(e){ /* the server side is what matters; report the result below */ }
+  await refreshPushUI();
+}
+
+document.addEventListener('click', (e) => {
+  if(e.target.closest('#pushEnable')) enablePush();
+  else if(e.target.closest('#pushDisable')) disablePush();
+  else if(e.target.closest('#pushTest')){
+    setPushUI('Sending…', '', []);
+    fetch('/api/push/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+      .then((r) => r.json())
+      .then((r) => setPushUI(
+        r.sent ? 'Test sent — it should arrive within a few seconds.'
+               : 'Nothing was delivered (' + (r.failed || 0) + ' failed, ' + (r.removed || 0) + ' expired).',
+        '', ['disable','test']))
+      .catch(() => setPushUI('Could not send a test.', '', ['disable','test']));
+  }
+});
+
+/* ---------- one worker in detail ---------- */
+
+// Which worker's panel is open, by name. Kept as state rather than read back
+// out of the DOM so the panel refreshes in place on the next poll instead of
+// freezing at the numbers it was opened with.
+let openWorker = null;
+
+document.addEventListener('click', (e) => {
+  if(e.target.closest('#wdClose')){ closeWorker(); return; }
+  const row = e.target.closest('.wrow');
+  // A click on the copy button inside a row must not also open the panel.
+  if(row && !e.target.closest('button')) openWorkerPanel(row.getAttribute('data-worker'));
+});
+document.addEventListener('keydown', (e) => {
+  if(e.key === 'Escape' && openWorker){ closeWorker(); return; }
+  const row = e.target && e.target.closest ? e.target.closest('.wrow') : null;
+  if(row && (e.key === 'Enter' || e.key === ' ')){
+    e.preventDefault();
+    openWorkerPanel(row.getAttribute('data-worker'));
+  }
+});
+
+function closeWorker(){
+  openWorker = null;
+  $('wdetail').hidden = true;
+}
+
+// Incremented on every open. A slow /api/worker response for the worker you
+// clicked FIRST would otherwise land after the second one and repaint the panel
+// with the wrong worker's shares under the right worker's name.
+let workerRequest = 0;
+
+async function openWorkerPanel(name){
+  if(!name) return;
+  openWorker = name;
+  $('wdetail').hidden = false;
+  $('wdName').textContent = name;
+  $('wdetail').scrollIntoView({block:'nearest'});
+  await refreshWorkerPanel();
+}
+
+async function refreshWorkerPanel(){
+  const name = openWorker;
+  if(!name) return;
+  const ticket = ++workerRequest;
+  let data = null;
+  try{
+    const res = await fetch('/api/worker?name=' + encodeURIComponent(name), {cache:'no-store'});
+    if(res.ok) data = await res.json();
+  }catch(e){ /* handled below */ }
+  // Someone clicked another worker while this was in flight, or closed the
+  // panel. Whatever is on screen now is newer than what this call returned.
+  if(ticket !== workerRequest || openWorker !== name) return;
+
+  // Still show what the live status knows, even if the stored history for this
+  // name has not been written yet — a worker that connected a minute ago has a
+  // row in the table but no file entry.
+  const live = (lastStatus && lastStatus.workers || []).find((w) => w.worker === name) || null;
+  const stored = data && data.ok ? data.worker : null;
+
+  if(!live && !stored){
+    $('wdSub').textContent = 'this worker is not connected and has no stored history';
+    $('wdBest').textContent = '—'; $('wdShares').textContent = '—';
+    $('wdWork').textContent = '—'; $('wdSince').textContent = '—';
+    drawHashrateChart([], 86400, '24h', 'wdChart', 'wdChartFoot');
+    $('wdRejects').innerHTML = '';
+    return;
+  }
+
+  $('wdSub').textContent = live
+    ? [live.userAgent, live.remote, 'paying ' + (live.payoutAddress || '—')].filter(Boolean).join(' · ')
+    : 'not connected right now';
+
+  const best = Math.max(live ? live.bestShareDiff || 0 : 0, stored ? stored.bestShareDiff || 0 : 0);
+  const netDiff = lastStatus ? (lastStatus.smoothedDifficulty || lastStatus.networkDifficulty) : 0;
+  $('wdBest').textContent = compact(best);
+  $('wdBestSub').textContent = netDiff > 0 && best > 0
+    ? percent(best/netDiff) + ' of a block' + (stored && stored.bestShareAt ? ' · ' + since(stored.bestShareAt) + ' ago' : '')
+    : 'no shares yet';
+
+  const acc = stored ? stored.accepted : (live ? live.accepted : 0);
+  const rej = stored ? stored.rejected : (live ? live.rejected : 0);
+  $('wdShares').textContent = count(acc);
+  $('wdSharesSub').textContent = rej
+    ? count(rej) + ' rejected (' + percent(rej/Math.max(1, acc+rej)) + ')'
+    : 'none rejected';
+
+  // Lifetime work for this worker alone, in the same units as the headline
+  // figure: stratum difficulty x 2^16 hashes, over the hashes a block costs.
+  const hashes = (stored ? stored.work || 0 : 0) * 65536;
+  const perBlock = netDiff > 0 ? netDiff * Math.pow(2, 32) : 0;
+  const worth = perBlock > 0 ? hashes/perBlock : 0;
+  $('wdWork').textContent = worth > 0 ? (worth >= 0.01 ? worth.toFixed(2) : worth.toExponential(1)) : '—';
+
+  const first = stored ? stored.firstSeen : (live ? live.connectedAt : null);
+  $('wdSince').textContent = first ? since(first) : '—';
+  $('wdSinceSub').textContent = live && live.connectedAt
+    ? 'this session ' + since(live.connectedAt)
+    : 'not connected right now';
+
+  drawHashrateChart(stored ? stored.samples : [], 86400, '24h', 'wdChart', 'wdChartFoot');
+
+  // Reject reasons: the live counters reset with the app, the stored ones do
+  // not, so both are worth showing when they differ.
+  const reasons = Object.entries((stored && stored.rejectReasons) || {}).sort((a,b) => b[1]-a[1]);
+  if(!reasons.length){
+    $('wdRejects').innerHTML = '<p class="empty">No rejected shares on record for this worker.</p>';
+  } else {
+    let h = '<table><thead><tr><th>Reject reason</th><th class="r">Count</th></tr></thead><tbody>';
+    for(const [reason, times] of reasons){
+      h += '<tr><td>' + esc(reason) + '</td><td class="num r">' + count(times) + '</td></tr>';
+    }
+    $('wdRejects').innerHTML = h + '</tbody></table>' +
+      '<p class="empty">Stale shares are normal: the job changed while the miner was still working on the old one. They cost you nothing — that work could not have become a block anyway.</p>';
+  }
+}
 
 /* ---------- ruler ---------- */
 const DECADES = 6;
@@ -417,6 +775,51 @@ function sparkline(history, windowMs){
   return html + '</div>';
 }
 
+/* ---------- worker helpers ---------- */
+
+// Round-trip time, with an honest note about where it came from. A value
+// measured from the subscribe/authorize handshake also contains the miner's own
+// parsing time, so it is an upper bound and is marked with a tilde. Firmware
+// that answers client.get_version gives a clean measurement and no tilde.
+function pingText(w, plain){
+  if(w.latencyMs == null) return plain ? 'no ping' : '<span class="unit">—</span>';
+  const approx = w.latencyFrom === 'handshake';
+  const body = (approx ? '~' : '') + w.latencyMs + ' ms';
+  // The phone line is plain text, so a slow link is marked in words rather than
+  // by colour — otherwise the one place a phone shows latency is also the one
+  // place that never warns about it.
+  if(plain) return w.latencyMs > 500 ? body + ' (slow)' : body;
+  if(w.latencyMs > 500) return '<span class="tag warn">' + body + '</span>';
+  return (approx ? '~' : '') + w.latencyMs + ' <span class="unit">ms</span>';
+}
+
+// Is this worker in trouble? Two separate failures, because they need different
+// answers: a board that has gone silent (power, network, crash) and one that is
+// still submitting but at a fraction of its own normal rate (throttling, a dead
+// hashboard, a loose riser).
+//
+// The comparison is against the worker's OWN 24-hour average, not against the
+// other miners — a 13 MH/s device is not unhealthy for being slower than a
+// 70 MH/s one.
+function workerHealth(w){
+  const now = Date.now();
+  const quiet = w.lastShareAt ? now - w.lastShareAt : now - w.connectedAt;
+  // Expected seconds between shares at the difficulty this worker is on. A
+  // fixed threshold would cry wolf for a small miner on a high difficulty and
+  // stay silent for hours for a fast one.
+  const expected = w.hashrate > 0 ? (w.difficulty * 65536) / w.hashrate : 0;
+  const limit = Math.max(300000, expected * 8000);
+  if(quiet > limit){
+    return { level: 'bad', text: 'no share for ' + since(w.lastShareAt || w.connectedAt) + ' — check this miner' };
+  }
+  const hist = history.workers && history.workers[w.worker];
+  const avg = hist && hist.avg24h;
+  if(avg > 0 && w.hashrate > 0 && w.hashrate < avg * 0.5){
+    return { level: 'warn', text: 'running at ' + Math.round((w.hashrate/avg)*100) + '% of its own 24h average' };
+  }
+  return { level: 'ok', text: '' };
+}
+
 /* ---------- SVG helpers ---------- */
 function el(name, attrs){
   const node = document.createElementNS(SVG_NS, name);
@@ -425,10 +828,17 @@ function el(name, attrs){
 }
 function clear(svg){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
 
-const W = 700, H = 180, PAD_L = 46, PAD_R = 8, PAD_T = 10, PAD_B = 22;
+// PAD_L has to hold the widest y-axis label. At phone width .axis-text grows
+// to 16 viewBox units (9 would render as a grey smudge), so a label that fits
+// comfortably on a laptop is clipped on a phone unless the gutter is sized for
+// the larger type. Labels are kept to five characters to match.
+const W = 700, H = 180, PAD_L = 74, PAD_R = 8, PAD_T = 26, PAD_B = 22;
 
-function drawHashrateChart(samples, rangeSeconds, label){
-  const svg = $('hrChart');
+// svgId/noteId default to the main chart; the worker detail panel passes its
+// own so one drawing routine serves both and they cannot drift apart.
+function drawHashrateChart(samples, rangeSeconds, label, svgId, noteId){
+  const svg = $(svgId || 'hrChart');
+  const note = $(noteId || 'hrChartNote');
   clear(svg);
   const now = Date.now()/1000;
   const from = now - rangeSeconds;
@@ -439,23 +849,31 @@ function drawHashrateChart(samples, rangeSeconds, label){
     const t = el('text',{x:W/2,y:H/2,class:'axis-text','text-anchor':'middle'});
     t.textContent = 'not enough history yet — a point is recorded every minute';
     svg.appendChild(t);
-    $('hrChartNote').textContent = '';
+    if(note) note.textContent = '';
     return;
   }
 
-  const max = Math.max(...pts.map(p => p[1])) || 1;
-  const top = max * 1.15;
+  // `|| 1` keeps the scale usable when every sample is zero, but it must not
+  // then be reported as a peak of 1 H/s that never happened.
+  const max = Math.max(...pts.map(p => p[1]));
+  const top = (max || 1) * 1.15;
   const x = (ts) => PAD_L + ((ts - from)/rangeSeconds) * (W - PAD_L - PAD_R);
   const y = (v) => H - PAD_B - (v/top) * (H - PAD_T - PAD_B);
+
+  // One unit for the whole axis, named once at the top, so each label is a bare
+  // number. Repeating "MH/s" on every gridline is what pushed these labels out
+  // of the viewBox and left them clipped on a phone.
+  const unit = hashrate(top);
+  const factor = top > 0 ? top / Number(unit.n) : 1;
 
   // horizontal grid + y labels
   for(let i = 0; i <= 3; i++){
     const v = (top/3)*i;
     const yy = y(v);
     svg.appendChild(el('line',{x1:PAD_L,y1:yy,x2:W-PAD_R,y2:yy,class:'grid-line'}));
-    const hr = hashrate(v);
+    const scaled = v/factor;
     const t = el('text',{x:PAD_L-6,y:yy+3,class:'axis-text','text-anchor':'end'});
-    t.textContent = i === 0 ? '0' : hr.n + ' ' + hr.u;
+    t.textContent = i === 0 ? '0' : (scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1));
     svg.appendChild(t);
   }
 
@@ -480,8 +898,13 @@ function drawHashrateChart(samples, rangeSeconds, label){
 
   const avg = pts.reduce((s,p)=>s+p[1],0)/pts.length;
   const a = hashrate(avg), m = hashrate(max);
-  $('hrChartNote').textContent =
+  if(note) note.textContent =
     pts.length + ' samples · average ' + a.n + ' ' + a.u + ' · peak ' + m.n + ' ' + m.u;
+  // The axis carries bare numbers; the unit is named in the heading instead.
+  // Drawing it inside the SVG put it on top of the maximum-value label, because
+  // preserveAspectRatio stretches the box vertically at phone width and the two
+  // baselines converge.
+  return unit.u;
 }
 
 function drawShareChart(shareLog, networkDifficulty){
@@ -497,8 +920,19 @@ function drawShareChart(shareLog, networkDifficulty){
   }
 
   const from = pts[0][0], to = Math.max(pts[pts.length-1][0], from + 1);
-  const target = networkDifficulty > 0 ? networkDifficulty : Math.max(...pts.map(p=>p[1])) * 10;
-  const loMax = Math.log10(Math.max(target, 1e-12));
+  // No invented block line. Without a real network difficulty the old fallback
+  // drew the line at ten times the best share, which on mainnet understates the
+  // distance to a block by a factor of about ten thousand — and it was visible
+  // for up to 30 seconds on load, because the charts refresh on their own
+  // slower timer than the status they depend on.
+  const haveTarget = networkDifficulty > 0;
+  const target = haveTarget ? networkDifficulty : Math.max(...pts.map(p=>p[1])) * 1.6;
+  // The ceiling must clear the data as well as the target. When the network
+  // difficulty is BELOW the shares — regtest, or any chain whose difficulty
+  // dips under the vardiff floor — a ceiling of `target` alone puts every point
+  // on the block line, which reads as "every share was a block".
+  const highest = Math.max(...pts.map((p) => p[1]), 1e-12);
+  const loMax = Math.log10(Math.max(target, highest * 1.6, 1e-12));
   // Keep the floor below the ceiling even when the network difficulty is lower
   // than the shares themselves — which happens on regtest and on any chain
   // whose difficulty falls under the vardiff floor. Without this the scale
@@ -527,9 +961,9 @@ function drawShareChart(shareLog, networkDifficulty){
 
   // the block line
   const ty = y(target);
-  svg.appendChild(el('line',{x1:PAD_L,y1:ty,x2:W-PAD_R,y2:ty,class:'target-line'}));
+  if(haveTarget) svg.appendChild(el('line',{x1:PAD_L,y1:ty,x2:W-PAD_R,y2:ty,class:'target-line'}));
   const tl = el('text',{x:W-PAD_R,y:ty-5,class:'axis-text','text-anchor':'end'});
-  tl.textContent = 'block · ' + compact(target);
+  tl.textContent = haveTarget ? 'block · ' + compact(target) : 'waiting for the network difficulty';
   svg.appendChild(tl);
 
   const bestVal = Math.max(...pts.map(p => p[1]));
@@ -570,6 +1004,27 @@ function clearAlarm(){
 document.addEventListener('click', (e) => {
   if(e.target && e.target.id === 'dismissAlarm') clearAlarm();
 });
+
+// Blocks this page has already announced, and the one the banner is currently
+// describing. Both are page state, not server state: the banner exists to
+// interrupt someone who is looking at the page when it happens.
+const announcedBlocks = new Set();
+let bannerBlockHash = null;
+
+function showBanner(b){
+  const verdict = b.status === 'accepted'
+    ? 'The node accepted it, so it is on the chain.'
+    : b.status === 'submitting'
+      ? 'It is being submitted to your node now — this line will change when the node answers.'
+      : b.status === 'stale'
+        ? 'Another block reached this height first, so it did not make the chain. Nothing was done wrong.'
+        : 'Your node did not accept it' + (b.error ? ': ' + esc(b.error) : '.');
+  $('jackpotText').innerHTML =
+    'Height <span class="num">' + b.height + '</span>, worth <span class="num">' +
+    (Number.isFinite(b.reward) ? (b.reward/1e8).toLocaleString('en-US',{maximumFractionDigits:2}) : '—') +
+    ' DOGE</span>, found by ' +
+    esc(b.worker) + ' and paid to <span class="num">' + esc(b.address) + '</span>. ' + verdict;
+}
 
 function raiseAlarm(block){
   if(alarmOn) return;
@@ -652,9 +1107,14 @@ function renderCharts(){
     '30d': [30*86400,    history.hourSamples,   'last 30 days'],
   };
   const [seconds, samples, label] = map[chartRange] || map['24h'];
-  $('hrChartTitle').textContent = label;
-  drawHashrateChart(samples, seconds, label);
+  const chartUnit = drawHashrateChart(samples, seconds, label);
+  $('hrChartTitle').textContent = chartUnit ? label + ' · ' + chartUnit : label;
   drawShareChart(history.shareLog, lastStatus ? lastStatus.networkDifficulty : null);
+  // The open detail panel refreshes on the history cadence, not the 5-second
+  // status one: its payload carries a day of per-minute samples, and re-fetching
+  // that every five seconds on a phone is real bandwidth for a chart that moves
+  // once a minute.
+  if(openWorker) refreshWorkerPanel();
 }
 
 /* ---------- main refresh ---------- */
@@ -668,7 +1128,13 @@ async function tick(){
     $('mastMeta').textContent = 'dashboard unreachable';
     return;
   }
+  const hadStatus = !!lastStatus;
   lastStatus = d;
+  // The charts are drawn on the slower history timer but depend on the network
+  // difficulty, which only the status carries. On a cold load the first chart
+  // is drawn without it; redraw once as soon as it arrives instead of leaving a
+  // difficulty-less chart on screen for half a minute.
+  if(!hadStatus && history.shareLog && history.shareLog.length) renderCharts();
   const notice = $('notice');
 
   if(!d.ok){
@@ -685,17 +1151,28 @@ async function tick(){
   if(knownBlocks === null){
     knownBlocks = d.blocksFound;
   } else if(d.blocksFound > knownBlocks && d.blocks.length){
-    const b = d.blocks.find((x) => x.status === 'accepted') || d.blocks[0];
+    // blocksFound counts ACCEPTED blocks, but a candidate is added to the list
+    // the moment it is found, while it is still being submitted. So the newest
+    // entry is not necessarily the block whose acceptance just fired this —
+    // pick the newest accepted one that this page has not announced yet.
+    const b = d.blocks.find((x) => x.status === 'accepted' && !announcedBlocks.has(x.hash))
+      || d.blocks[0];
     if(Date.now() - b.at < RECENT_MS){
-    $('jackpotText').innerHTML =
-      'Height <span class="num">' + b.height + '</span>, worth <span class="num">' +
-      (b.reward/1e8).toLocaleString('en-US',{maximumFractionDigits:2}) + ' DOGE</span>, found by ' +
-      esc(b.worker) + ' and paid to <span class="num">' + esc(b.address) + '</span>. ' +
-      'The node accepted it, so it is on the chain.';
+      announcedBlocks.add(b.hash);
+      bannerBlockHash = b.hash;
+      showBanner(b);
       raiseAlarm(b);
     }
   }
   knownBlocks = d.blocksFound;
+
+  // Keep the banner honest afterwards. Its text is written once, when the block
+  // is announced; a block announced while still being submitted would otherwise
+  // keep saying "this line will change when the node answers" forever.
+  if(bannerBlockHash){
+    const still = d.blocks.find((x) => x.hash === bannerBlockHash);
+    if(still) showBanner(still);
+  }
 
   if(d.templateError){
     notice.className = 'notice show bad';
@@ -706,6 +1183,13 @@ async function tick(){
   } else if(!d.workers.length){
     notice.className = 'notice show';
     notice.textContent = 'No miners connected. Point one at the stratum URL below; it will appear here within a few seconds.';
+  } else if(workerAlarms(d.workers).length){
+    // A miner that has stopped is the one thing on this page you can actually
+    // act on, so it outranks the housekeeping warnings below it.
+    const alarms = workerAlarms(d.workers);
+    const worst = alarms.some((a) => a.level === 'bad');
+    notice.className = 'notice show' + (worst ? ' bad' : '');
+    notice.textContent = alarms.map((a) => a.worker + ': ' + a.text).join(' · ');
   } else if(persistenceWarning){
     notice.className = 'notice show';
     notice.textContent = persistenceWarning;
@@ -729,7 +1213,12 @@ async function tick(){
   const shareOfNetwork = netHash > 0 ? d.totalHashrate/netHash : 0;
   $('hrSub').textContent = d.workers.length
     ? d.workers.length + (d.workers.length === 1 ? ' worker' : ' workers') +
-      (shareOfNetwork > 0 ? ' · 1 in ' + compact(1/shareOfNetwork) + ' of the network' : '')
+      // Only when we are actually a fraction of the network. Above 1 the
+      // reciprocal is a number below one and it prints "1 in 2.25e-5", which
+      // is nonsense; that happens on regtest and during a difficulty collapse.
+      (shareOfNetwork > 0 && shareOfNetwork < 1
+        ? ' · 1 in ' + compact(1/shareOfNetwork) + ' of the network'
+        : shareOfNetwork >= 1 ? ' · more than the whole network' : '')
     : 'nothing connected';
 
   const best = d.bestShareDiff || 0;
@@ -760,7 +1249,7 @@ async function tick(){
   const stale = d.workers.filter((w) => !w.lastShareAt || Date.now() - w.lastShareAt > 300000).length;
   $('fWorkersSub').textContent = stale ? stale + ' with no recent share' : (d.workers.length ? 'all submitting' : '—');
 
-  $('fShares').textContent = compact(d.accepted);
+  $('fShares').textContent = count(d.accepted);
   const total = d.accepted + d.rejected;
   const rejectRate = total > 0 ? (100*d.rejected)/total : 0;
   $('fShares').className = 'v' + (rejectRate > 10 ? ' badc' : rejectRate > 5 ? ' warnc' : '');
@@ -814,28 +1303,57 @@ async function tick(){
   if(!d.workers.length){
     $('workers').innerHTML = '<p class="empty">Nothing connected yet.</p>';
   } else {
-    let h = '<table><thead><tr><th>Worker</th><th>Activity</th><th class="r">Hashrate</th>' +
-            '<th class="r hide">Difficulty</th><th class="r hide">Ping</th><th class="r hide">Shares</th><th class="r">Last</th></tr></thead><tbody>';
+    let h = '<table class="wtab"><thead><tr><th>Worker</th><th>Activity</th><th class="r">Hashrate</th>' +
+            '<th class="r hide">Difficulty</th><th class="r hide">Best share</th>' +
+            '<th class="r hide">Ping</th><th class="r hide">Shares</th><th class="r">Last</th></tr></thead><tbody>';
     for(const w of d.workers){
       const wh = hashrate(w.hashrate);
       const idle = !w.lastShareAt || Date.now() - w.lastShareAt > 300000;
-      const ping = w.latencyMs == null ? '<span class="unit">—</span>'
-        : (w.latencyMs > 500 ? '<span class="tag warn">' + w.latencyMs + ' ms</span>' : w.latencyMs + ' <span class="unit">ms</span>');
-      h += '<tr>' +
-        '<td><div class="wname">' + esc(w.worker) + '</div><div class="wsub">' + esc(w.userAgent || w.remote || '') + '</div></td>' +
+      const health = workerHealth(w);
+      h += '<tr class="wrow" tabindex="0" role="button" data-worker="' + esc(w.worker) + '">' +
+        '<td><div class="wname">' + esc(w.worker) + '</div>' +
+          '<div class="wsub">' + esc(w.userAgent || w.remote || '') + '</div>' +
+          // Phone-only line. Below 640px the numeric columns are hidden to keep
+          // the table readable, and a difficulty you can only see on a laptop
+          // is a difficulty you never see.
+          '<div class="wmeta">' + pingText(w, true) + ' · diff ' + compact(w.difficulty) +
+            ' · best ' + compact(w.bestShareDiff || 0) +
+            ' · ' + w.accepted + ' shares' + (w.rejected ? ' · ' + w.rejected + ' rejected' : '') +
+          '</div>' +
+          (health.level !== 'ok' ? '<div class="wwarn ' + health.level + '">' + esc(health.text) + '</div>' : '') +
+        '</td>' +
         '<td>' + sparkline(w.shareHistory, 10*60*1000) + '</td>' +
         '<td class="num r">' + wh.n + ' <span class="unit">' + wh.u + '</span></td>' +
         '<td class="num r hide">' + compact(w.difficulty) + '</td>' +
-        '<td class="num r hide">' + ping + '</td>' +
+        '<td class="num r hide">' + compact(w.bestShareDiff || 0) + '</td>' +
+        '<td class="num r hide">' + pingText(w, false) + '</td>' +
         '<td class="num r hide">' + w.accepted + (w.rejected ? ' <span class="tag bad">' + w.rejected + '</span>' : '') + '</td>' +
         '<td class="num r">' + (idle ? '<span class="tag bad">' + since(w.lastShareAt) + '</span>' : since(w.lastShareAt)) + '</td>' +
       '</tr>';
     }
-    $('workers').innerHTML = h + '</tbody></table>';
+    // Re-rendering the table throws away the focused element, so a keyboard
+    // user loses their place every five seconds. Put focus back on the same
+    // worker's row afterwards.
+    const focusedWorker = document.activeElement && document.activeElement.closest
+      ? (document.activeElement.closest('.wrow') || {}).dataset : null;
+    $('workers').innerHTML = h + '</tbody></table>' +
+      '<p class="empty">Tap a worker for its own history, best share and reject reasons.</p>';
+    if(focusedWorker && focusedWorker.worker){
+      const again = document.querySelector('.wrow[data-worker="' + cssEscape(focusedWorker.worker) + '"]');
+      // preventScroll: a focused row is left behind by an ordinary tap, and
+      // without this every five-second refresh drags that row back into view —
+      // scrolling the detail panel the user just opened off the screen.
+      if(again) again.focus({preventScroll:true});
+    }
   }
 
   $('cUrl').textContent = 'stratum+tcp://' + location.hostname + ':' + d.stratumPort;
   $('cUser').textContent = d.payoutAddress || '(no address configured)';
+  // The username field means different things depending on one setting, and a
+  // dashboard that describes the other one is worse than saying nothing.
+  $('connectNote').textContent = d.lockPayoutAddress
+    ? 'Every block pays the address above, whatever a worker puts in the username field — that is what LOCK_PAYOUT_ADDRESS does, and it is why this port is safe to expose. Use the username for a name you will recognise in the table. The password is ignored; miners insist on one, so send anything.'
+    : 'Put a Dogecoin address in the username field and any block that worker finds pays that address. Anything else falls back to the address configured for this app. The password is ignored — miners insist on one, so send anything.';
 
   // blocks
   const TAGS = {
@@ -933,6 +1451,7 @@ async function refreshHistory(){
 buildRuler();
 tick();
 refreshHistory();
+refreshPushUI();
 setInterval(tick, 5000);
 setInterval(refreshHistory, 30000);
 document.addEventListener('visibilitychange', () => { if(!document.hidden){ tick(); refreshHistory(); } });

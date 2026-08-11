@@ -71,7 +71,14 @@ const baseConfig = (extra) => ({
       res.reason);
 
     const absurd = Math.floor(Date.now() / 1000) + 10800; // 3 hours ahead
-    const res2 = validateShare(job, {
+    // A SEPARATE job with a target nothing can meet. On regtest the real network
+    // target is so easy that a random hash is often a "block", and a block
+    // candidate is deliberately NEVER refused for its ntime — the node decides
+    // that, not our clock. Mutating the shared job here would also starve the
+    // later sections, which brute-force until they find a candidate.
+    const hardJob = new Job('a', stale, script);
+    hardJob.networkTarget = 1n;
+    const res2 = validateShare(hardJob, {
       extranonce1: Buffer.from('00000000', 'hex'),
       extranonce2Hex: '00000000',
       ntimeHex: absurd.toString(16).padStart(8, '0'),
