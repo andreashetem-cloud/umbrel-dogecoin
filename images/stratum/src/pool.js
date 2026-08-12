@@ -15,6 +15,7 @@ const { EventEmitter } = require('node:events');
 
 const { RpcClient } = require('./rpc');
 const { Job, validateShareAsync, EXTRANONCE1_SIZE, EXTRANONCE2_SIZE } = require('./job');
+const { MergedJob, LTC_RULES, DOGE_CHAIN_ID } = require('./merged');
 const u = require('./util');
 
 const MAX_LINE_BYTES = 16 * 1024;
@@ -66,6 +67,23 @@ class Pool extends EventEmitter {
     // 15 seconds that is generous for every other call — and a timeout there
     // would look like a failure when the node is actually accepting it.
     this.submitRpc = new RpcClient({ ...config.rpc, timeout: 180000 });
+
+    // Merged mining, off unless asked for. Everything below this line that
+    // reads `this.merged` is dead code in Dogecoin-only mode, which is what
+    // this app runs in production: the parent-chain paths are additions beside
+    // the existing ones, not modifications of them.
+    //
+    // In merged mode the roles swap: `this.rpc` (Dogecoin) stops serving
+    // templates and only does createauxblock/submitauxblock, while the
+    // Litecoin clients below carry the getblocktemplate/longpoll/submitblock
+    // traffic — with the same three-client split and for the same reasons.
+    this.merged = !!config.mergedMining;
+    if (this.merged) {
+      if (!config.ltcRpc) throw new Error('merged mining needs ltcRpc connection details');
+      this.ltcRpc = new RpcClient(config.ltcRpc);
+      this.ltcLongpollRpc = new RpcClient({ ...config.ltcRpc, timeout: 120000 });
+      this.ltcSubmitRpc = new RpcClient({ ...config.ltcRpc, timeout: 180000 });
+    }
 
     this.jobs = new Map();
     this.jobCounter = 0;
@@ -122,6 +140,8 @@ class Pool extends EventEmitter {
       `payout address ${this.config.payoutAddress} accepted on ${this.chain} ` +
         `(script ${this.payoutScript.toString('hex')})`
     );
+
+    if (this.merged) await this.startMerged();
 
     // Guard against a second start() on the same instance. The caller retries
     // on failure, and without this each retry would leave behind another poll
@@ -206,6 +226,58 @@ class Pool extends EventEmitter {
     this.log(`stratum listening on 0.0.0.0:${this.config.stratumPort}`);
   }
 
+  // The parent chain's half of startup: reachable node, real address, and a
+  // Dogecoin daemon that actually speaks the aux RPCs.
+  //
+  // Every check here refuses to start rather than degrading. A merged pool that
+  // silently falls back to one chain looks identical to a working one on the
+  // dashboard while half the reward it was configured for is never claimed.
+  async startMerged() {
+    const info = await this.ltcRpc.call('getblockchaininfo');
+    this.ltcChain =
+      info.chain === 'regtest' ? 'ltc-regtest' : info.chain === 'test' ? 'ltc-test' : 'ltc-main';
+
+    if (!this.config.ltcPayoutAddress) {
+      throw new Error(
+        'merged mining is on but LTC_PAYOUT_ADDRESS is not set; the Litecoin block reward has nowhere to go'
+      );
+    }
+    // Deliberately checked against the LITECOIN version bytes. A Dogecoin
+    // address decodes cleanly as base58check and would produce a perfectly
+    // well-formed script — paying a hash160 nobody on Litecoin has the key
+    // for. This is the quietest way to lose a whole block reward.
+    this.ltcPayoutScript = u.addressToScript(this.config.ltcPayoutAddress, this.ltcChain);
+    this.log(
+      `merged mining: parent ${this.ltcChain} paying ${this.config.ltcPayoutAddress} ` +
+        `(script ${this.ltcPayoutScript.toString('hex')}), aux Dogecoin paying ${this.config.payoutAddress}`
+    );
+
+    // Fail now if dogecoind cannot serve aux blocks — an old build, or one
+    // without the wallet — instead of at the first template refresh.
+    const probe = await this.rpc.call('createauxblock', [this.config.payoutAddress]);
+    if (!probe || !/^[0-9a-f]{64}$/.test(String(probe.hash))) {
+      throw new Error('createauxblock did not return an aux block hash');
+    }
+    // The chain ID the proof is checked against is a constant in merged.js;
+    // if the daemon on the other end of this socket is not the chain that
+    // constant describes, every proof we build is rejected.
+    if (probe.chainid !== DOGE_CHAIN_ID) {
+      throw new Error(
+        `the aux node reports chain id ${probe.chainid}, not Dogecoin's ${DOGE_CHAIN_ID}`
+      );
+    }
+
+    // A worker's username address cannot be honoured here. The parent coinbase
+    // pays a LITECOIN script, and the aux coinbase is built by dogecoind from
+    // the address given to createauxblock — so a Dogecoin address in a username
+    // would either be pasted into a Litecoin block or ignored. Lock it, and say
+    // so, rather than let the dashboard report a payout that is not happening.
+    if (!this.config.lockPayoutAddress) {
+      this.config.lockPayoutAddress = true;
+      this.log('merged mining: per-worker payout addresses are disabled; both rewards go to the configured addresses');
+    }
+  }
+
   // Ask the node about every block we recorded but never resolved.
   //
   // A crash, a power cut or a kill during the submit-retry window leaves a
@@ -222,8 +294,14 @@ class Pool extends EventEmitter {
 
     let resolved = 0;
     for (const b of unresolved) {
+      // Ask the chain the block belongs to. Records written before merged mode
+      // existed carry no `chain` and are Dogecoin's. Asking dogecoind about a
+      // Litecoin hash gets an honest "not found", which would rewrite a good
+      // block to "the node does not have this block" on every restart.
+      const rpc = b.chain === 'LTC' ? this.ltcRpc : this.rpc;
+      if (!rpc) continue;
       try {
-        const block = await this.rpc.call('getblock', [b.hash]);
+        const block = await rpc.call('getblock', [b.hash]);
         // confirmations is -1 for a block the node knows but that is not on the
         // main chain, which is exactly the orphaned case.
         if (block && block.confirmations >= 1) {
@@ -388,7 +466,14 @@ class Pool extends EventEmitter {
   // that did not exist.
   emitSafely(event, payload) {
     if (this.listenerCount(event) === 0) {
-      this.log(`${event}: ${payload && payload.message ? payload.message : payload}`);
+      // An unlistened 'error' carries an Error; the block events carry a record.
+      // Interpolating an object straight into a template gives "[object
+      // Object]", which is exactly the wrong thing to find in a log after a
+      // block. Describe what is actually there.
+      const detail = payload && payload.message ? payload.message
+        : payload && payload.height ? `height ${payload.height} (${payload.hash || 'no hash'})`
+        : String(payload);
+      this.log(`${event}: ${detail}`);
       return;
     }
     try {
@@ -429,6 +514,7 @@ class Pool extends EventEmitter {
   // ---------------------------------------------------------------- templates
 
   async refreshTemplate(reason) {
+    if (this.merged) return this.refreshMergedTemplate(reason, null);
     try {
       const askedAt = Date.now();
       const template = await this.rpc.getBlockTemplate();
@@ -460,6 +546,156 @@ class Pool extends EventEmitter {
       }
       this.stats.templateError = err.message;
       throw err;
+    }
+  }
+
+  // The merged equivalent, kept as a separate function so the Dogecoin-only
+  // path above is not made conditional.
+  //
+  // The two chains are fetched SEPARATELY and fail separately, which matters
+  // more than it looks. Litecoin is the chain being hashed: if the parent tip
+  // moves and we do not rebuild, every miner keeps working on a header whose
+  // previous block is orphaned, and every Litecoin block found in that window
+  // is worthless. Dogecoin going away must therefore not stop the parent job
+  // from being rebuilt — a stale aux commitment is just opaque bytes to
+  // Litecoin, so the last known aux hash is carried forward and only the
+  // Dogecoin half is at risk while dogecoind is down.
+  //
+  // `template` is passed in by the longpoll loop, which has just been handed a
+  // fresh one and must not ask for another.
+  async refreshMergedTemplate(reason, template) {
+    const askedAt = Date.now();
+    let parent;
+    try {
+      parent = template || (await this.ltcRpc.call('getblocktemplate', [{ rules: LTC_RULES }]));
+    } catch (err) {
+      this.nodeLatency = [];
+      this.noteTemplateFailure(`cannot reach the Litecoin node (${reason}): ${err.message}`, err);
+      throw err;
+    }
+
+    // Polled rather than longpolled: dogecoind has no longpoll for aux blocks.
+    // It caches internally and hands back the same block until its own tip or
+    // mempool moves, so this is cheap.
+    let auxBlock = null;
+    try {
+      auxBlock = await this.rpc.call('createauxblock', [this.config.payoutAddress]);
+      if (this.auxUnavailableSince) {
+        this.log(`the Dogecoin node is answering again after ${
+          Math.round((Date.now() - this.auxUnavailableSince) / 1000)
+        }s`);
+      }
+      this.auxUnavailableSince = null;
+    } catch (err) {
+      // Keep mining Litecoin on the last aux commitment we had. A Dogecoin
+      // block found now would be refused — dogecoind forgets an aux block once
+      // its tip moves — but a Litecoin block found now is worth just as much as
+      // ever, and stopping would forfeit both.
+      auxBlock = this.currentJob && this.currentJob.auxBlock ? this.currentJob.auxBlock : null;
+      if (!this.auxUnavailableSince) {
+        this.auxUnavailableSince = Date.now();
+        this.log(
+          `cannot reach the Dogecoin node (${reason}): ${err.message}` +
+            (auxBlock ? '; continuing on Litecoin with the last aux block' : '')
+        );
+      }
+      if (!auxBlock) {
+        this.noteTemplateFailure(null, err);
+        throw err;
+      }
+    }
+
+    this.recordNodeLatency(Date.now() - askedAt);
+    if (this.stats.templateError) {
+      this.log(`the mining nodes are answering again after ${
+        Math.round((Date.now() - (this.stats.templateFailedAt || Date.now())) / 1000)
+      }s`);
+    }
+    this.stats.templateError = null;
+    this.stats.templateFailedAt = null;
+    // Cleared on success as well: without this the next failure is compared
+    // against a timestamp from the previous outage and suppressed.
+    this.templateLoggedAt = null;
+    this.templateLoggedMessage = null;
+    this.stats.lastTemplateAt = Date.now();
+
+    // 2: the aux chain being unreachable is NOT a template error — the parent
+    // job is fine and Litecoin mining continues — but it must not therefore be
+    // invisible. The dashboard shows a Dogecoin height that has stopped moving
+    // and everything else green; without this the operator has no way to tell
+    // that half the app is dead, and the worst case is a node that answers but
+    // is in initial download, where its tip IS moving and every Dogecoin share
+    // is doomed.
+    this.stats.auxError = this.auxUnavailableSince
+      ? `the Dogecoin node has been unreachable for ${
+          Math.round((Date.now() - this.auxUnavailableSince) / 1000)
+        }s — Litecoin mining continues, Dogecoin blocks cannot be submitted`
+      : null;
+
+    this.onMergedTemplate(parent, auxBlock, reason);
+  }
+
+  // One place to record a template failure, so the "log it once" rule actually
+  // holds. The longpoll loop clears templateError before each attempt, so a
+  // guard that only checks templateError logged on every iteration — about
+  // thirty lines a minute, forever, which is exactly what pushes the BLOCK HEX
+  // recovery line out of a rotating container log.
+  noteTemplateFailure(message, err) {
+    const now = Date.now();
+    // Deduped on the MESSAGE as well as on time. Time alone means a flapping
+    // node — fail, recover, fail again within the minute — logs the first
+    // failure and then goes quiet, leaving "the mining nodes are answering
+    // again" as the last line while the node is down at that moment.
+    const same = message === this.templateLoggedMessage;
+    if (message && (!same || !this.templateLoggedAt || now - this.templateLoggedAt > 60000)) {
+      this.templateLoggedMessage = message;
+      this.templateLoggedAt = now;
+      this.log(message);
+    }
+    if (!this.stats.templateFailedAt) this.stats.templateFailedAt = now;
+    this.stats.templateError = err.message;
+  }
+
+  onMergedTemplate(template, auxBlock, reason) {
+    if (template.longpollid) this.lastLongpollId = template.longpollid;
+
+    // EITHER tip moving invalidates the job. The aux hash covers the Dogecoin
+    // side: it changes when Dogecoin's tip moves and also when its mempool
+    // does, and continuing to commit to a superseded aux block means every
+    // Dogecoin block we find is refused.
+    const isNewBlock =
+      !this.currentJob ||
+      this.currentJob.template.previousblockhash !== template.previousblockhash ||
+      this.currentJob.auxHash !== auxBlock.hash;
+
+    if (!isNewBlock) {
+      const ageMs = Date.now() - this.currentJob.createdAt;
+      const gainedValue = template.coinbasevalue > this.currentJob.coinbaseValue;
+      if (!gainedValue && ageMs < this.config.jobRebuildMs) return;
+    }
+
+    const id = (++this.jobCounter).toString(16).padStart(8, '0');
+    const job = new MergedJob(id, template, this.ltcPayoutScript, this.config.coinbaseTag, auxBlock);
+    this.jobs.set(id, job);
+    this.currentJob = job;
+    // Dogecoin's difficulty, keyed on Dogecoin's tip: this is a Dogecoin app,
+    // and "expected wait" means the wait for a Dogecoin block.
+    if (isNewBlock) this.recordNetworkDifficulty(job.auxDifficulty, auxBlock.previousblockhash);
+
+    while (this.jobs.size > JOB_HISTORY) {
+      this.jobs.delete(this.jobs.keys().next().value);
+    }
+
+    if (isNewBlock) {
+      this.log(
+        `new merged job — Dogecoin height ${job.auxHeight} (difficulty ` +
+          `${job.auxDifficulty.toFixed(0)}), Litecoin height ${job.height} (difficulty ` +
+          `${job.networkDifficulty.toFixed(0)}) (${reason})`
+      );
+    }
+
+    for (const client of this.clients.values()) {
+      if (client.authorized) this.sendJob(client, job, isNewBlock);
     }
   }
 
@@ -528,12 +764,18 @@ class Pool extends EventEmitter {
       }
       const startedAt = Date.now();
       try {
-        const template = await this.longpollRpc.call('getblocktemplate', [
-          { longpollid: id, rules: [] },
-        ]);
+        // In merged mode this longpolls LITECOIN — the parent tip is the one
+        // that invalidates the header miners are hashing. Dogecoin's tip is
+        // caught by the createauxblock poll instead, which is the only
+        // mechanism dogecoind offers.
+        const template = await (this.merged ? this.ltcLongpollRpc : this.longpollRpc).call(
+          'getblocktemplate',
+          [{ longpollid: id, rules: this.merged ? LTC_RULES : [] }]
+        );
         this.stats.templateError = null;
         this.stats.lastTemplateAt = Date.now();
-        this.onTemplate(template, 'longpoll');
+        if (this.merged) await this.refreshMergedTemplate('longpoll', template);
+        else this.onTemplate(template, 'longpoll');
       } catch (err) {
         // A timeout here is normal and expected; anything else deserves a pause
         // so a broken node does not turn into a busy loop.
@@ -959,8 +1201,22 @@ class Pool extends EventEmitter {
 
     // Submit first. Everything below is bookkeeping, and a block must not
     // depend on it.
+    //
+    // The two chains are dispatched separately and neither is awaited. One
+    // hash can win on both, and a throw, a rejection or a node that is simply
+    // down on one side must not cost the block on the other — so each gets its
+    // own guard rather than sharing a try.
     if (result.isBlockCandidate) {
-      this.submitBlock(effectiveJob, result, client);
+      this.dispatchSubmission(
+        () => this.submitBlock(effectiveJob, result, client),
+        this.merged ? 'Litecoin block submission' : 'block submission'
+      );
+    }
+    if (result.isAuxCandidate) {
+      this.dispatchSubmission(
+        () => this.submitAuxBlock(effectiveJob, result, client),
+        'Dogecoin aux block submission'
+      );
     }
 
     // Count the share even if the socket has gone. The work was done and
@@ -1072,6 +1328,42 @@ class Pool extends EventEmitter {
     throw lastError;
   }
 
+  // The aux chain's equivalent. submitauxblock answers with a boolean rather
+  // than Core's verdict string, so it is normalised into the same vocabulary
+  // the shared machinery below already speaks.
+  async submitAuxWithRetries(auxHash, auxPowHex, height) {
+    const delays = [0, 1000, 3000, 10000, 30000, 60000];
+    let lastError = null;
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt] > 0) await sleep(delays[attempt]);
+      try {
+        const ok = await this.submitRpc.call('submitauxblock', [auxHash, auxPowHex]);
+        return ok === true ? null : 'dogecoind refused the auxpow proof';
+      } catch (err) {
+        lastError = err;
+        this.log(
+          `submitauxblock attempt ${attempt + 1}/${delays.length} for height ${height} failed: ${err.message}`
+        );
+      }
+    }
+    throw lastError;
+  }
+
+  // Guard a submission that is deliberately not awaited. Without this a
+  // rejection from one chain is an unhandled rejection at process level, and a
+  // synchronous throw would propagate back into the share handler and abort the
+  // other chain's submission before it was ever dispatched.
+  dispatchSubmission(fn, what) {
+    try {
+      const p = fn();
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => this.log(`${what} failed: ${err.message}`));
+      }
+    } catch (err) {
+      this.log(`${what} failed: ${err.message}`);
+    }
+  }
+
   async submitBlock(job, result, client) {
     this.inFlightBlocks = (this.inFlightBlocks || 0) + 1;
     try {
@@ -1081,17 +1373,108 @@ class Pool extends EventEmitter {
     }
   }
 
+  async submitAuxBlock(job, result, client) {
+    this.inFlightBlocks = (this.inFlightBlocks || 0) + 1;
+    try {
+      await this.submitAuxBlockInner(job, result, client);
+    } finally {
+      this.inFlightBlocks--;
+    }
+  }
+
+  async submitAuxBlockInner(job, result, client) {
+    const auxPowHex = job.auxPowHex(result.header, result.coinbase);
+
+    // Check our own proof against Dogecoin's rules before spending the retry
+    // schedule on it. The one input here we do not control is extranonce2, and
+    // a miner that puts a second merged-mining magic in it makes the proof
+    // invalid — which must cost this submission only. The Litecoin block for
+    // the same share is already on its way, independently.
+    const verdict = job.verifyAgainstDogecoin(result.header, result.coinbase);
+    if (!verdict.ok) {
+      this.log(
+        `NOT submitting the Dogecoin aux block at height ${job.auxHeight}: ${verdict.problems.join(' | ')}`
+      );
+      return;
+    }
+
+    await this.submitCandidate({
+      chain: 'DOGE',
+      height: job.auxHeight,
+      hash: job.auxHash,
+      // Not a block: the auxpow proof, which is what recovers this block by
+      // hand if everything else fails. Same reasoning as the block hex.
+      hex: auxPowHex,
+      hexLabel: `AUXPOW HEX chain=DOGE height=${job.auxHeight} auxhash=${job.auxHash}`,
+      reward: job.auxValue,
+      address: this.config.payoutAddress,
+      worker: client.worker,
+      submit: () => this.submitAuxWithRetries(job.auxHash, auxPowHex, job.auxHeight),
+    });
+  }
+
   async submitBlockInner(job, result, client) {
-    const address = client.payoutAddress || this.config.payoutAddress;
-    this.log(
-      `BLOCK CANDIDATE at height ${job.height} by ${client.worker} — ${result.blockHash}`
-    );
-    const record = {
+    // In merged mode this block is the LITECOIN one, and it pays the Litecoin
+    // address; a worker's own address is refused at authorize time there.
+    const address = this.merged
+      ? this.config.ltcPayoutAddress
+      : client.payoutAddress || this.config.payoutAddress;
+    await this.submitCandidate({
+      chain: this.merged ? 'LTC' : 'DOGE',
       height: job.height,
       hash: result.blockHash,
-      worker: client.worker,
-      address,
+      hex: result.blockHex,
+      hexLabel: this.merged
+        ? `BLOCK HEX chain=LTC height=${job.height}`
+        : `BLOCK HEX height=${job.height}`,
       reward: job.coinbaseValue,
+      address,
+      worker: client.worker,
+      submit: () =>
+        this.merged
+          ? this.submitLtcWithRetries(result.blockHex, job.height)
+          : this.submitWithRetries(result.blockHex, job.height),
+    });
+  }
+
+  async submitLtcWithRetries(blockHex, height) {
+    const delays = [0, 1000, 3000, 10000, 30000, 60000];
+    let lastError = null;
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt] > 0) await sleep(delays[attempt]);
+      try {
+        return await this.ltcSubmitRpc.submitBlock(blockHex);
+      } catch (err) {
+        lastError = err;
+        this.log(
+          `Litecoin submitblock attempt ${attempt + 1}/${delays.length} for height ${height} failed: ${err.message}`
+        );
+      }
+    }
+    throw lastError;
+  }
+
+  // Everything between "we hold a winning hash" and "the node has ruled on it",
+  // for whichever chain won: the durable record, the hex in the log, the
+  // notification, the retries and the verdict. One implementation, because this
+  // is the sequence that costs real money when it is subtly different in two
+  // places.
+  async submitCandidate({ chain, height, hash, hex, hexLabel, reward, address, worker, submit }) {
+    // Log lines carry the chain only in merged mode: with merged mining off
+    // these are the exact strings this app has always written, and someone
+    // grepping a year of container logs should not have to know that.
+    const where = this.merged ? `${chain} height ${height}` : `height ${height}`;
+    const what = this.merged ? `${chain} block` : 'block';
+    this.log(`BLOCK CANDIDATE at ${where} by ${worker} — ${hash}`);
+    const record = {
+      // Which chain this block is on. Without it the dashboard shows two
+      // records at unrelated heights and reconciliation asks the wrong node.
+      chain,
+      height,
+      hash,
+      worker,
+      address,
+      reward,
       at: Date.now(),
       status: 'submitting',
       accepted: null,
@@ -1104,7 +1487,7 @@ class Pool extends EventEmitter {
     // the submission. A dying SD card can hold fsync for tens of seconds or
     // forever, and this line is the difference between a recoverable situation
     // and 10,000 DOGE gone. It must not depend on a disk that may be failing.
-    console.log(`[pool] BLOCK HEX height=${job.height} ${result.blockHex}`);
+    console.log(`[pool] ${hexLabel} ${hex}`);
 
     if (this.store) {
       // The store keeps a copy WITHOUT the block hex: fifty mainnet blocks of
@@ -1130,10 +1513,10 @@ class Pool extends EventEmitter {
     // submission entirely.
     this.emitSafely('blockfound', record);
 
-    record.blockHex = result.blockHex;
+    record.blockHex = hex;
 
     try {
-      const response = await this.submitWithRetries(result.blockHex, job.height);
+      const response = await submit();
       // submitblock does not answer with a simple yes/no. Bitcoin Core, and
       // Dogecoin Core with it, returns null on success but also "duplicate",
       // "inconclusive" and "duplicate-inconclusive" for blocks that are
@@ -1151,7 +1534,7 @@ class Pool extends EventEmitter {
           this.store.updateBlock(record.hash, { status: 'accepted', accepted: true });
           this.store.save(true);
         }
-        this.log(`BLOCK ACCEPTED at height ${job.height} — ${result.blockHash}`);
+        this.log(`BLOCK ACCEPTED at ${where} — ${hash}`);
         // Also guarded: this call sits inside the try that decides the
         // block's fate, so a throwing listener would land in the catch below
         // and rewrite an ACCEPTED block to "error" — on disk.
@@ -1161,20 +1544,20 @@ class Pool extends EventEmitter {
         record.accepted = false;
         record.error = 'valid, but another block reached this height first';
         if (this.store) this.store.updateBlock(record.hash, { status: 'stale', accepted: false, error: record.error });
-        this.log(`block at height ${job.height} was orphaned (${verdict})`);
+        this.log(`block at ${where} was orphaned (${verdict})`);
       } else {
         record.status = 'rejected';
         record.accepted = false;
         record.error = verdict;
         if (this.store) this.store.updateBlock(record.hash, { status: 'rejected', accepted: false, error: verdict });
-        this.log(`block REJECTED by node: ${verdict}`);
+        this.log(`${what} REJECTED by node: ${verdict}`);
       }
     } catch (err) {
       record.status = 'error';
       record.accepted = false;
       record.error = err.message;
       if (this.store) this.store.updateBlock(record.hash, { status: 'error', accepted: false, error: err.message });
-      this.log(`block submission failed: ${err.message}`);
+      this.log(`${what} submission failed: ${err.message}`);
     }
     // Whatever happened, get a fresh template immediately.
     this.refreshTemplate('post-submit').catch(() => {});
@@ -1267,21 +1650,38 @@ class Pool extends EventEmitter {
       }));
 
     const job = this.currentJob;
+    // In merged mode the headline numbers stay DOGECOIN's — height, difficulty,
+    // reward. This is a Dogecoin app: "how long until a block" means a Dogecoin
+    // block, and showing Litecoin's height beside a Dogecoin payout address
+    // would be actively misleading. The parent chain gets its own object.
+    const merged = this.merged && job
+      ? {
+          parentChain: 'LTC',
+          parentHeight: job.height,
+          parentDifficulty: job.networkDifficulty,
+          parentReward: job.coinbaseValue,
+          parentPayoutAddress: this.config.ltcPayoutAddress,
+        }
+      : null;
     return {
       chain: this.chain,
+      mergedMining: !!this.merged,
+      merged,
       stratumPort: this.config.stratumPort,
       payoutAddress: this.config.payoutAddress,
       lockPayoutAddress: !!this.config.lockPayoutAddress,
+      profile: this.config.profile || 'home',
       startedAt: this.stats.startedAt,
-      height: job ? job.height : null,
-      networkDifficulty: job ? job.networkDifficulty : null,
+      height: job ? (this.merged ? job.auxHeight : job.height) : null,
+      networkDifficulty: job ? (this.merged ? job.auxDifficulty : job.networkDifficulty) : null,
       smoothedDifficulty: this.smoothedDifficulty(),
       difficultySamples: (this.difficultyHistory || []).length,
       nodeLatencyMs: this.medianNodeLatency(),
       firstStartedAt: this.stats.firstStartedAt || this.stats.startedAt,
-      coinbaseValue: job ? job.coinbaseValue : null,
+      coinbaseValue: job ? (this.merged ? job.auxValue : job.coinbaseValue) : null,
       templateAgeMs: this.stats.lastTemplateAt ? Date.now() - this.stats.lastTemplateAt : null,
       templateError: this.stats.templateError,
+      auxError: this.stats.auxError || null,
       accepted: this.stats.accepted,
       rejected: this.stats.rejected,
       rejectReasons: this.stats.rejectReasons,

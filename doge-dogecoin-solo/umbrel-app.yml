@@ -2,7 +2,7 @@ manifestVersion: 1
 id: doge-dogecoin-solo
 category: bitcoin
 name: Dogecoin Solo Mining
-version: "1.2.0"
+version: "1.3.0"
 tagline: Point your scrypt miners at your own Dogecoin node
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -52,6 +52,21 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  Merged mining. With the Litecoin Node app installed, the same hashes can now win on
+  BOTH chains: your miners hash Litecoin headers carrying a commitment to a Dogecoin block,
+  which is how Dogecoin has been mined since 2014. A share meeting Litecoin's target becomes
+  a Litecoin block, one meeting Dogecoin's becomes a Dogecoin block, and neither costs the
+  other anything. Off by default; the Dogecoin-only path is unchanged.
+
+
+  Renting hashpower is now one setting. MINING_PROFILE switches every limit at
+  once between your own miners and a NiceHash-style order, because a rented order
+  is thousands of times faster and the home limits would disconnect it as a flood
+  within a second. The app refuses to start in the rented profile unless the payout
+  address is locked, since renting means the stratum port is open to the internet
+  and an unlocked payout pays whoever asks.
+
+
   Every worker now has its own page: tap one in the table to see its own hashrate chart over the last
   day, its best share, how much work it has done, and why any of its shares were rejected. Best share
   and difficulty are shown per device, and on a phone they appear under the worker's name instead of

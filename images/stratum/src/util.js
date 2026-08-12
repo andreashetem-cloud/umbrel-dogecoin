@@ -177,9 +177,18 @@ function base58Decode(str) {
 // prefixes rather than Dogecoin's own testnet ones — verified empirically
 // against dogecoind 1.14.9, not assumed.
 const ADDRESS_VERSIONS = {
+  // Dogecoin.
   main: { p2pkh: [0x1e], p2sh: [0x16] },
   test: { p2pkh: [0x71], p2sh: [0xc4] },
   regtest: { p2pkh: [0x6f, 0x71], p2sh: [0xc4] },
+  // Litecoin, for merged mining: the parent block pays a Litecoin address, and
+  // paying it to a Dogecoin-shaped script would make the parent block invalid
+  // on its own chain — the half of the reward that is easiest to lose silently.
+  // 0x32 is the modern P2SH prefix (M...), 0x05 the legacy one (3...), which
+  // Litecoin still accepts.
+  'ltc-main': { p2pkh: [0x30], p2sh: [0x32, 0x05] },
+  'ltc-test': { p2pkh: [0x6f], p2sh: [0x3a, 0xc4] },
+  'ltc-regtest': { p2pkh: [0x6f], p2sh: [0x3a, 0xc4] },
 };
 
 // Returns the scriptPubKey that a coinbase output must carry to pay `address`.

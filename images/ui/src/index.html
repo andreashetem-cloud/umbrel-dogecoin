@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="referrer" content="no-referrer" />
-<title>Dogecoin Node</title>
+<title>__COIN_NAME__ Node</title>
 <style nonce="__CSP_NONCE__">
   :root {
     --bg: #0d0f14;
@@ -13,8 +13,11 @@
     --line: #262c38;
     --text: #e9edf5;
     --muted: #8b95a8;
-    --gold: #c2a633;
-    --gold-soft: #e3c95c;
+    /* The coin's accent, substituted by the server. Still named --gold after
+       the default it started out as, because every rule below says --gold. */
+    --accent-deep: __ACCENT_DEEP__;
+    --gold: __ACCENT__;
+    --gold-soft: __ACCENT_SOFT__;
     --green: #3fbf7f;
     --amber: #e0a33e;
     --red: #e05c5c;
@@ -38,7 +41,7 @@
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; flex-wrap: wrap; }
   .logo {
     width: 42px; height: 42px; border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, var(--gold-soft), var(--gold) 65%, #8f7a1f);
+    background: radial-gradient(circle at 35% 30%, var(--gold-soft), var(--gold) 65%, var(--accent-deep));
     display: grid; place-items: center; font-weight: 800; color: #241f08; font-size: 20px; flex-shrink: 0;
   }
   h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
@@ -137,10 +140,10 @@
 <body>
 
 <header>
-  <div class="logo" aria-hidden="true">Ð</div>
+  <div class="logo" aria-hidden="true">__COIN_GLYPH__</div>
   <div>
-    <h1>Dogecoin Node</h1>
-    <div class="sub" id="version">Connecting to dogecoind…</div>
+    <h1>__COIN_NAME__ Node</h1>
+    <div class="sub" id="version">Connecting to __DAEMON_NAME__…</div>
   </div>
   <div class="pill" role="status" aria-live="polite">
     <span class="dot" id="dot" aria-hidden="true"></span><span id="statusText">Connecting</span>
@@ -162,7 +165,7 @@
     <div class="rate" id="rate"></div>
   </div>
   <div class="hint" id="syncHint">
-    The initial sync downloads and verifies the entire Dogecoin blockchain — roughly 150 GB. Leave it
+    The initial sync downloads and verifies the entire __COIN_NAME__ blockchain — __CHAIN_SIZE_HINT__. Leave it
     running; it picks up where it left off after a restart.
   </div>
 </div>
@@ -229,7 +232,7 @@
   <div class="hint hidden" id="peerNote"></div>
 </div>
 
-<footer>Powered by Dogecoin Core · refreshes every 5 seconds</footer>
+<footer>Powered by __CORE_NAME__ · refreshes every 5 seconds</footer>
 
 <script nonce="__CSP_NONCE__">
 (function () {
@@ -303,7 +306,7 @@
   function setWarnings(list) {
     var el = $('warning');
     if (list && list.length) {
-      el.textContent = 'Dogecoin Core reports: ' + list.join(' · ');
+      el.textContent = '__CORE_NAME__ reports: ' + list.join(' · ');
       show(el, true);
     } else {
       show(el, false);
@@ -350,9 +353,10 @@
   }
 
   function prettyVersion(subversion) {
-    // "Shibetoshi:1.14.9" is the user agent; nobody outside Dogecoin knows that.
+    // The user agent is the coin's own vanity string — "Shibetoshi:1.14.9",
+    // "LitecoinCore:0.21.4" — and means nothing to anyone outside that project.
     var m = /:([\d.]+)/.exec(subversion || '');
-    return m ? 'Dogecoin Core ' + m[1] : (subversion || 'unknown');
+    return m ? '__CORE_NAME__ ' + m[1] : (subversion || 'unknown');
   }
 
   function render(s) {
@@ -505,12 +509,12 @@
         var startingUp = Date.now() - firstSeen < 120000;
         $('dot').className = 'dot ' + (startingUp ? 'sync' : 'err');
         $('statusText').textContent = startingUp ? 'Starting' : 'Unavailable';
-        $('version').textContent = 'Waiting for dogecoind…';
+        $('version').textContent = 'Waiting for __DAEMON_NAME__…';
         setError(startingUp
-          ? 'Waiting for Dogecoin Core to start. This normally takes a minute or two after installing ' +
+          ? 'Waiting for __CORE_NAME__ to start. This normally takes a minute or two after installing ' +
             'or restarting the app.'
-          : 'Cannot reach Dogecoin Core. Check the app logs with: ' +
-            'sudo docker logs --tail 50 doge-dogecoin-node_dogecoind_1');
+          : 'Cannot reach __CORE_NAME__. Check the app logs with: ' +
+            'sudo docker logs --tail 50 __DAEMON_CONTAINER__');
       });
   }
 

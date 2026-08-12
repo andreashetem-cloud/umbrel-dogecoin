@@ -14,7 +14,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.2.0
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.3.0
     restart: on-failure
     logging: *default-logging
     # Docker's default is 10 seconds, and the shutdown handler waits up to 130
@@ -67,10 +67,17 @@ services:
       # large compared to a Bitcoin pool and that is correct.
       #
       # Vardiff tunes each worker individually; these are only the bounds.
-      # 2048 suits an 11 MH/s device at roughly one share every 12 seconds.
-      START_DIFFICULTY: "2048"
-      MIN_DIFFICULTY: "64"
-      MAX_DIFFICULTY: "4194304"
+      #
+      # The bounds themselves come from MINING_PROFILE at the bottom of this
+      # file and are deliberately NOT set here: a value written out explicitly
+      # wins over the profile, so setting them would make switching to the
+      # rented profile do nothing at all. The home values are, for reference:
+      #
+      #   START_DIFFICULTY 2048   an 11 MH/s device at ~1 share every 12s
+      #   MIN_DIFFICULTY   64
+      #   MAX_DIFFICULTY   4194304
+      #
+      # Uncomment one only if you want it fixed regardless of profile.
       TARGET_SHARE_SECONDS: "12"
       VARDIFF_WINDOW: "10"
 
@@ -80,30 +87,31 @@ services:
       POLL_INTERVAL_SECONDS: "5"
       JOB_REBUILD_SECONDS: "30"
       HASHRATE_WINDOW_SECONDS: "600"
-      SOCKET_TIMEOUT_SECONDS: "900"
 
       COINBASE_TAG: "/umbrel-doge-solo/"
 
       # --- limits --------------------------------------------------------
       # Stratum has no authentication — there is no account to authenticate
       # against — so anything unbounded is a denial-of-service path for anyone
-      # who can reach port 22557. These are the ceilings.
-      MAX_CONNECTIONS: "64"
-      # Per source address. Without this, one machine opening silent TCP
-      # sockets takes every slot and locks your real miners out.
-      MAX_CONNECTIONS_PER_IP: "8"
-      MAX_MESSAGES_PER_10S: "300"
-      MAX_PAYOUT_VARIANTS: "16"
+      # who can reach port 22557.
+      #
+      # These ceilings also come from MINING_PROFILE, for the same reason as the
+      # difficulty bounds above. The home values are:
+      #
+      #   MAX_CONNECTIONS          64
+      #   MAX_CONNECTIONS_PER_IP    8   one machine opening silent sockets must
+      #                                 not be able to take every slot
+      #   MAX_MESSAGES_PER_10S    300
+      #   MAX_PAYOUT_VARIANTS      16
+      #   DIFFICULTY_GRACE_SECONDS 60   work handed out just before a difficulty
+      #                                 raise is still accepted this long, or
+      #                                 every raise looks like failing hardware
+      #   SOCKET_TIMEOUT_SECONDS  900
+      #   PING_INTERVAL_SECONDS    60
+      #
       # Seconds a connection may sit without authorizing before it is dropped.
+      # Not profile-dependent: a handshake takes milliseconds either way.
       HANDSHAKE_TIMEOUT_SECONDS: "30"
-      # After a difficulty increase, work the miner had already been handed is
-      # still accepted for this long. Without it, every raise produces a burst
-      # of rejects that looks like failing hardware.
-      DIFFICULTY_GRACE_SECONDS: "60"
-      # How often each worker is pinged with client.get_version to measure the
-      # round-trip time. Firmware that ignores the request still gets a latency,
-      # measured from the subscribe/authorize handshake instead.
-      PING_INTERVAL_SECONDS: "60"
 
       # Ignore the address in a worker's username and pay EVERY block to
       # PAYOUT_ADDRESS.
@@ -117,46 +125,31 @@ services:
       LOCK_PAYOUT_ADDRESS: "1"
 
       # ---------------------------------------------------------------------
-      # Renting hashpower (NiceHash and similar)
+      # Which kind of miner is pointed at this pool.
       #
-      # Only relevant if you forward port 22557 to the internet. Read the
-      # warning above twice before you do: LOCK_PAYOUT_ADDRESS must be "1", and
-      # the port is then reachable by everyone, not only the service you rented
-      # from. Firewall it to the source addresses you actually see in the log as
-      # soon as you know them.
+      #   home    your own hardware on your own network. The default.
+      #   rented  a NiceHash-style order arriving over the internet.
       #
-      # A rented order is thousands of times faster than a home miner, and the
-      # defaults above are sized for a home miner. Uncomment this block instead:
+      # This is ONE setting rather than a dozen, because a rented order is three
+      # to four orders of magnitude faster than a home miner and every limit
+      # sized for a stranger becomes the thing that refuses the hashpower you
+      # paid for. At the home settings a 100 GH/s order opens by submitting
+      # roughly 750 shares a second, trips the flood limit and is disconnected
+      # before vardiff can react — the order shows as failing and the money is
+      # spent anyway. The rented profile raises the starting difficulty, the
+      # message ceiling, the connection caps, the socket timeout and the
+      # difficulty grace together. Anything you set explicitly here still wins.
       #
-      #   START_DIFFICULTY: "1048576"      # a 100 GH/s order starting at 2048
-      #                                    # submits 745 shares a SECOND and is
-      #                                    # disconnected by the rate limit
-      #                                    # before vardiff can react
-      #   MIN_DIFFICULTY: "65536"          # keeps a brief hashrate dip from
-      #                                    # dropping it back into that flood
-      #   MAX_DIFFICULTY: "268435456"      # the current cap silently pins a
-      #                                    # large order at 4x the intended
-      #                                    # share rate
-      #   MAX_MESSAGES_PER_10S: "1000"     # headroom for the initial ramp
-      #   MAX_CONNECTIONS: "256"           # an order arrives as many connections
-      #   MAX_CONNECTIONS_PER_IP: "256"    # ...all from a handful of their IPs,
-      #                                    # so the default 8 locks the order out
-      #   MAX_PAYOUT_VARIANTS: "1"         # belt and braces with the lock
-      #   DIFFICULTY_GRACE_SECONDS: "120"  # their aggregator applies difficulty
-      #                                    # changes slowly
-      #   SOCKET_TIMEOUT_SECONDS: "1800"   # a quiet connection at high
-      #                                    # difficulty must not be dropped
-      #   PING_INTERVAL_SECONDS: "300"     # they do not answer get_version
-      #   UV_THREADPOOL_SIZE: "8"          # scrypt verification runs on libuv's
-      #                                    # thread pool; the default is 4
+      # The app REFUSES to start with rented + LOCK_PAYOUT_ADDRESS off. Renting
+      # means the port is open to the internet, and on an open port an unlocked
+      # payout hands your block to whoever asks for it.
       #
-      # Two things stay true even with everything above set. Stratum has no
-      # accounts, so anyone who reaches the port can authorize under an existing
-      # worker's name and inflate that worker's share and reject counts — the
-      # statistics become untrustworthy, though with the payout locked no money
-      # moves. And connection slots are finite: a few hosts opening idle sockets
-      # can fill them and keep your real miners out. Both are reasons to
-      # firewall the port and to un-forward it the moment the order ends.
+      # Still true with everything set correctly: stratum has no accounts, so
+      # anyone reaching the port can authorize under one of your worker names
+      # and inflate its counters — the statistics become untrustworthy, though
+      # with the payout locked no money moves. And connection slots are finite.
+      # Both are reasons to firewall the port to the addresses you actually see
+      # in the log, and to un-forward it the moment the order ends.
       #
       # Worth knowing before you spend anything: rented scrypt hashpower is
       # priced off DOGE *and* Litecoin revenue combined, because everyone else
@@ -164,6 +157,42 @@ services:
       # throws that half away, so the expected return is roughly 25% below what
       # you pay. It buys a real end-to-end test and a lottery ticket, not profit.
       # ---------------------------------------------------------------------
+      MINING_PROFILE: "home"
+
+      # ---------------------------------------------------------------------
+      # Merged mining: Dogecoin AND Litecoin from the same hashes.
+      #
+      # Off by default. Switched on, your miners stop hashing Dogecoin headers
+      # and start hashing LITECOIN headers that carry a commitment to a Dogecoin
+      # block — which is how Dogecoin has been mined since 2014. A share that
+      # meets Litecoin's target becomes a Litecoin block; one that meets
+      # Dogecoin's becomes a Dogecoin block; neither costs the other anything.
+      # It is also why rented scrypt hashpower is priced off both chains at
+      # once: mining only Dogecoin throws half the value of every hash away.
+      #
+      # Requirements:
+      #   1. The Litecoin Node app, installed and fully synced. A pruned node is
+      #      fine — mining needs the UTXO set, not old blocks.
+      #   2. LTC_PAYOUT_ADDRESS: a Litecoin address you control. Legacy (L…) or
+      #      P2SH (M… / 3…). A bech32 ltc1… address is NOT supported here and
+      #      the app will refuse to start rather than mine to a script it cannot
+      #      build. Get one from the Litecoin app, or from any wallet you own.
+      #   3. The Litecoin node's RPC password. It is derived per device, so it
+      #      is not in this file. Read it out once with:
+      #
+      #        sudo docker exec doge-litecoin-node_litecoind_1 \
+      #          sh -c 'echo $RPC_PASSWORD'
+      #
+      #      and paste it below. Treat it like a password, because it is one.
+      #
+      # Nothing about the Dogecoin-only path changes while this is off.
+      # ---------------------------------------------------------------------
+      MERGED_MINING: "0"
+      # LTC_RPC_HOST: doge-litecoin-node_litecoind_1
+      # LTC_RPC_PORT: "9332"
+      # LTC_RPC_USER: "umbrel"
+      # LTC_RPC_PASSWORD: ""
+      # LTC_PAYOUT_ADDRESS: ""
     healthcheck:
       test: ["CMD", "node", "-e", "require('node:http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s

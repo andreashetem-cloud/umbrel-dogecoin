@@ -28,8 +28,17 @@ async function describeBlock() {
     // announcing the first one's height, worker and reward.
     const b = (d.blocks || [])[0];
     if (!b) return { title: 'Solo mining', body: 'Something happened worth opening the dashboard for.' };
+    // The chain the record belongs to decides both the name and the unit. This
+    // is the notification that arrives on a phone with the dashboard closed —
+    // the whole point of the push — and calling a 12.5 LTC block "13 DOGE"
+    // sends the user to the wrong wallet on the one day it matters.
+    const chain = b.chain === 'LTC' ? 'LTC' : 'DOGE';
+    // Litecoin rewards are small enough that rounding to whole coins loses
+    // real money from the message; Dogecoin rewards are five figures and
+    // decimals are noise.
+    const digits = chain === 'LTC' ? 4 : 0;
     const reward = Number.isFinite(b.reward)
-      ? (b.reward / 1e8).toLocaleString('en-US', { maximumFractionDigits: 0 }) + ' DOGE'
+      ? (b.reward / 1e8).toLocaleString('en-US', { maximumFractionDigits: digits }) + ' ' + chain
       : 'reward unknown';
     // A record restored from an older file may be missing fields; a
     // notification reading "Height undefined ... found by undefined" is worse
@@ -40,7 +49,7 @@ async function describeBlock() {
       : b.status === 'submitting' ? 'being submitted'
       : b.status;
     return {
-      title: 'You found a block!',
+      title: 'You found a ' + (chain === 'LTC' ? 'Litecoin' : 'Dogecoin') + ' block!',
       body: `${height} · ${reward} · ${state}${who}`,
     };
   } catch (e) {

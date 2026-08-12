@@ -18,9 +18,59 @@ const { PushService } = require('./push');
 const PORT = Number(process.env.PORT || 3000);
 const STRATUM_PORT = Number(process.env.STRATUM_PORT || 3333);
 
+// Two very different machines point at this pool, and one set of numbers cannot
+// serve both.
+//
+// A home miner does tens of megahashes. A rented order does tens of GIGAhashes
+// — three to four orders of magnitude more — and every limit that protects the
+// app from a stranger becomes the thing that refuses the hashpower you paid for.
+// At the home defaults a 100 GH/s order starts by submitting roughly 750 shares
+// a second, trips the flood limit, and is disconnected before vardiff has had a
+// chance to raise its difficulty. The order shows as failing and the money is
+// spent either way.
+//
+// So the profile is one setting rather than a dozen. Anything set explicitly in
+// the environment still wins over the profile — see num() below.
+const PROFILES = {
+  home: {},
+  rented: {
+    // Start where a rented order belongs: one share every few seconds, not
+    // hundreds a second. Vardiff still tunes from here.
+    START_DIFFICULTY: 1048576,
+    // A brief dip in delivered hashrate must not drop it back into the flood.
+    MIN_DIFFICULTY: 65536,
+    // The home ceiling silently pins a large order at four times the intended
+    // share rate.
+    MAX_DIFFICULTY: 268435456,
+    // Headroom for the first seconds, before vardiff has settled.
+    MAX_MESSAGES_PER_10S: 1000,
+    // An order arrives as many connections from a handful of the provider's own
+    // addresses, so the per-IP cap is what would lock it out.
+    MAX_CONNECTIONS: 256,
+    MAX_CONNECTIONS_PER_IP: 256,
+    // Their aggregator applies a difficulty change slowly, and work handed out
+    // before it lands must still be accepted.
+    DIFFICULTY_GRACE_SECONDS: 120,
+    // A connection at high difficulty is legitimately quiet for minutes.
+    SOCKET_TIMEOUT_SECONDS: 1800,
+    PING_INTERVAL_SECONDS: 300,
+    // With the payout locked there is no reason to build coinbase variants.
+    MAX_PAYOUT_VARIANTS: 1,
+  },
+};
+
+const PROFILE_NAME = (process.env.MINING_PROFILE || 'home').trim().toLowerCase();
+const PROFILE = PROFILES[PROFILE_NAME] || {};
+if (!PROFILES[PROFILE_NAME]) {
+  console.error(`[config] unknown MINING_PROFILE "${PROFILE_NAME}"; using the home profile`);
+}
+
 function num(name, fallback) {
   const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
+  // An explicit value always beats the profile, which always beats the default.
+  if (raw === undefined || raw === '') {
+    return Object.prototype.hasOwnProperty.call(PROFILE, name) ? PROFILE[name] : fallback;
+  }
   const v = Number(raw);
   if (!Number.isFinite(v)) {
     console.error(`[config] ${name}="${raw}" is not a number; using ${fallback}`);
@@ -37,6 +87,24 @@ const config = {
     password: process.env.RPC_PASSWORD || '',
   },
   payoutAddress: (process.env.PAYOUT_ADDRESS || '').trim(),
+
+  // --- merged mining ------------------------------------------------------
+  // Off unless MERGED_MINING=1. With it on, miners hash LITECOIN headers that
+  // carry a commitment to a Dogecoin block, and one share can win on both
+  // chains — see auxpow.js. It needs a second node and a second payout
+  // address, on the second chain, and refuses to start without them.
+  mergedMining: process.env.MERGED_MINING === '1',
+  ltcRpc: {
+    host: process.env.LTC_RPC_HOST || '127.0.0.1',
+    port: num('LTC_RPC_PORT', 9332),
+    user: process.env.LTC_RPC_USER || 'umbrel',
+    password: process.env.LTC_RPC_PASSWORD || '',
+  },
+  // A LITECOIN address. Validated against Litecoin's version bytes at startup:
+  // a Dogecoin address here decodes perfectly well and would silently pay a
+  // hash160 nobody on Litecoin can spend.
+  ltcPayoutAddress: (process.env.LTC_PAYOUT_ADDRESS || '').trim(),
+
   stratumPort: STRATUM_PORT,
   // Stratum-space difficulties (scrypt, so one share costs D * 2^16 hashes).
   // 2048 lands a 11 MH/s miner at ~12s per share and a 70 MH/s miner at ~2s,
@@ -64,7 +132,36 @@ const config = {
   difficultyGraceMs: num('DIFFICULTY_GRACE_SECONDS', 60) * 1000,
   pingIntervalMs: num('PING_INTERVAL_SECONDS', 60) * 1000,
   lockPayoutAddress: process.env.LOCK_PAYOUT_ADDRESS === '1',
+  profile: PROFILE_NAME in PROFILES ? PROFILE_NAME : 'home',
 };
+
+// A safety interlock, not a warning.
+//
+// The rented profile exists for one situation: the stratum port is reachable
+// from the internet. On that port there is no authentication and no way to tell
+// a paying customer from anyone else, and with the payout unlocked a stranger
+// simply puts their own address in the username and your node's next block pays
+// them. That is not a hypothetical — it was demonstrated against this app
+// during review. Refusing to start is the only response that cannot be missed
+// at two in the morning.
+if (config.profile === 'rented' && !config.lockPayoutAddress) {
+  console.error(
+    '[config] MINING_PROFILE=rented is meant for a stratum port that is reachable from ' +
+      'the internet, where anyone can mine to their own address unless the payout is locked. ' +
+      'Set LOCK_PAYOUT_ADDRESS=1, or switch back to MINING_PROFILE=home.'
+  );
+  process.exit(1);
+}
+
+// A way to read the effective configuration without starting anything. The
+// profile is only useful if it actually reaches the pool, and asserting that
+// from outside the process is the only test that proves it.
+if (process.env.DUMP_CONFIG === '1') {
+  // ltcRpc goes the same way as rpc: it carries a password.
+  const { rpc, payoutAddress, ltcRpc, ltcPayoutAddress, ...safe } = config;
+  console.log(`CONFIG ${JSON.stringify(safe)}`);
+  process.exit(0);
+}
 
 // Half an hour of minute samples before a per-worker average is used to judge
 // anything. Below that it is a measure of how long the worker has been back,
@@ -470,6 +567,16 @@ async function main() {
   if (!config.payoutAddress) {
     startupError =
       'PAYOUT_ADDRESS is not set. Set it to the Dogecoin address that should receive block rewards.';
+    console.error(`[config] ${startupError}`);
+  }
+
+  // The same refusal for the parent chain. Checked here rather than in the
+  // retry loop below: a missing address is not something retrying fixes, and
+  // mining Litecoin blocks that pay nobody is worse than not starting.
+  if (config.mergedMining && !config.ltcPayoutAddress && !startupError) {
+    startupError =
+      'MERGED_MINING=1 but LTC_PAYOUT_ADDRESS is not set. Set it to the Litecoin address that ' +
+      'should receive the parent block rewards.';
     console.error(`[config] ${startupError}`);
   }
 

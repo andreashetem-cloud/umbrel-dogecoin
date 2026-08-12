@@ -31,8 +31,17 @@ jobs:
           path: /tmp/dogecoin-*.tar.gz
           key: dogecoin-core-1.14.9-${{ runner.arch }}
 
+      - name: Cache the Litecoin Core release tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/litecoin-*.tar.gz
+          key: litecoin-core-0.21.4-${{ runner.arch }}
+
       - name: Entrypoint and config-generation suite
         run: ./test/entrypoint.sh
+
+      - name: Litecoin entrypoint and config-generation suite
+        run: ./test/ltc_entrypoint.sh
 
       - name: Integration suite
         run: ./test/integration.sh
@@ -48,6 +57,12 @@ jobs:
           dockerfile: images/core/Dockerfile
           failure-threshold: error
 
+      - name: Lint the Litecoin node Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: images/ltc-core/Dockerfile
+          failure-threshold: error
+
       - name: Lint the dashboard Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
@@ -60,7 +75,10 @@ jobs:
           shellcheck --severity=warning \
             images/core/entrypoint.sh \
             images/core/healthcheck.sh \
+            images/ltc-core/entrypoint.sh \
+            images/ltc-core/healthcheck.sh \
             doge-dogecoin-node/exports.sh \
+            doge-litecoin-node/exports.sh \
             scripts/*.sh \
             test/*.sh
 
@@ -81,6 +99,14 @@ jobs:
           push: false
           cache-from: type=gha,scope=core
           cache-to: type=gha,mode=max,scope=core
+      - name: Build litecoind (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: images/ltc-core
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=ltc-core
+          cache-to: type=gha,mode=max,scope=ltc-core
       - name: Build the dashboard (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:

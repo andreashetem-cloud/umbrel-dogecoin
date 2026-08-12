@@ -123,6 +123,9 @@ svg{display:block;width:100%;height:auto;min-height:130px}
 .pushbtns{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 .pushbtns button:not([hidden]){display:inline-block}
 .push .empty{padding:10px 0 0}
+/* A nonce'd stylesheet forbids inline style attributes, so spacing that would
+   otherwise be a style="" lives here. */
+.kv.spaced{margin-top:14px}
 
 /* ---------- one worker in detail ---------- */
 .wdetail{margin-top:18px;border:1px solid var(--gold-dim);background:var(--panel);padding:16px}
@@ -310,6 +313,8 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <div id="wdRejects"></div>
   </section>
 
+  <div class="notice" id="exposureNote"></div>
+
   <h2>Notifications <span class="aside" id="pushAside"></span></h2>
   <div class="push" id="pushBox">
     <p id="pushState">Checking…</p>
@@ -341,6 +346,26 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <div class="r"><span class="k">Template age</span><span class="v" id="nTemplate">—</span></div>
   </div>
   <p class="empty" id="diffNote"></p>
+
+  <!-- Merged mining only. The parent chain is where the work is actually done,
+       and a dashboard that showed only Dogecoin would be describing half of
+       what these hashes are buying. -->
+  <section id="parentBox" hidden>
+    <h2>Litecoin <span class="aside">the chain your miners actually hash</span></h2>
+    <div class="kv">
+      <div class="r"><span class="k">Block height</span><span class="v" id="pHeight">—</span></div>
+      <div class="r"><span class="k">Difficulty now</span><span class="v" id="pDiff">—</span></div>
+      <div class="r"><span class="k">Network hashrate</span><span class="v" id="pHash">—</span></div>
+      <div class="r"><span class="k">Your share of it</span><span class="v" id="pShare">—</span></div>
+      <div class="r"><span class="k">Block reward right now</span><span class="v" id="pReward">—</span></div>
+      <div class="r"><span class="k">Paid to</span><span class="v" id="pAddress">—</span></div>
+    </div>
+    <div class="kv spaced">
+      <div class="r"><span class="k">Chance of a Litecoin block in a year</span><span class="v" id="pOdds">—</span></div>
+      <div class="r"><span class="k">Chance of a Dogecoin block in a year</span><span class="v" id="dOdds">—</span></div>
+    </div>
+    <p class="empty" id="parentNote"></p>
+  </section>
 
   <h2>Blocks</h2>
   <div id="blocks"></div>
@@ -1011,6 +1036,13 @@ document.addEventListener('click', (e) => {
 const announcedBlocks = new Set();
 let bannerBlockHash = null;
 
+// Which asset a block record belongs to. In merged mining a Litecoin block and
+// a Dogecoin block arrive through the same code, at wildly different heights
+// and rewards, and calling both "DOGE" turns a €2,000 event into a message the
+// user cannot act on — wrong wallet, wrong explorer, wrong node.
+function chainOf(b){ return (b && b.chain === 'LTC') ? 'LTC' : 'DOGE'; }
+function coinName(b){ return chainOf(b) === 'LTC' ? 'Litecoin' : 'Dogecoin'; }
+
 function showBanner(b){
   const verdict = b.status === 'accepted'
     ? 'The node accepted it, so it is on the chain.'
@@ -1020,9 +1052,9 @@ function showBanner(b){
         ? 'Another block reached this height first, so it did not make the chain. Nothing was done wrong.'
         : 'Your node did not accept it' + (b.error ? ': ' + esc(b.error) : '.');
   $('jackpotText').innerHTML =
-    'Height <span class="num">' + b.height + '</span>, worth <span class="num">' +
+    '<b>' + coinName(b) + '.</b> Height <span class="num">' + b.height + '</span>, worth <span class="num">' +
     (Number.isFinite(b.reward) ? (b.reward/1e8).toLocaleString('en-US',{maximumFractionDigits:2}) : '—') +
-    ' DOGE</span>, found by ' +
+    ' ' + chainOf(b) + '</span>, found by ' +
     esc(b.worker) + ' and paid to <span class="num">' + esc(b.address) + '</span>. ' + verdict;
 }
 
@@ -1039,7 +1071,13 @@ function raiseAlarm(block){
   }, 1200);
   try{
     if(window.Notification && Notification.permission === 'granted'){
-      new Notification('Dogecoin block found', { body: 'Height ' + block.height + ' — ' + (block.reward/1e8).toFixed(0) + ' DOGE' });
+      new Notification(coinName(block) + ' block found', {
+        // Four decimals for Litecoin: a 12.5 LTC block rounded to "13" is a
+        // wrong number about real money. Dogecoin blocks are five figures, so
+        // decimals there are noise.
+        body: 'Height ' + block.height + ' — ' +
+          (block.reward/1e8).toFixed(chainOf(block) === 'LTC' ? 4 : 0) + ' ' + chainOf(block),
+      });
     }
   }catch(e){ /* not available over plain http; the page state is the fallback */ }
   // Sound only if the page has had a user gesture. Browsers block audio before
@@ -1177,6 +1215,12 @@ async function tick(){
   if(d.templateError){
     notice.className = 'notice show bad';
     notice.textContent = 'Cannot reach the Dogecoin node: ' + d.templateError;
+  } else if(d.auxError){
+    // Merged mining with one chain down. Everything else on this page looks
+    // healthy — hashrate, workers, template age — and only the Dogecoin height
+    // quietly stops moving, so this has to be said out loud.
+    notice.className = 'notice show bad';
+    notice.textContent = d.auxError;
   } else if(d.templateAgeMs != null && d.templateAgeMs > 120000){
     notice.className = 'notice show';
     notice.textContent = 'The block template is ' + Math.round(d.templateAgeMs/1000) + ' seconds old. Check that the Dogecoin node is synced and responding.';
@@ -1265,7 +1309,13 @@ async function tick(){
 
   $('fBlocks').textContent = d.blocksFound;
   $('fBlocks').className = 'v' + (d.blocksFound ? ' gold' : '');
-  $('fBlocksSub').textContent = d.blocks.length ? 'last ' + since(d.blocks[0].at) + ' ago' : 'none yet';
+  // In merged mode the count spans two chains, so say how it splits rather than
+  // leaving the user to guess which one paid.
+  const ltcBlocks = d.blocks.filter((b) => chainOf(b) === 'LTC' && b.accepted === true).length;
+  const dogeBlocks = d.blocks.filter((b) => chainOf(b) !== 'LTC' && b.accepted === true).length;
+  $('fBlocksSub').textContent = !d.blocks.length ? 'none yet'
+    : (d.mergedMining ? dogeBlocks + ' DOGE · ' + ltcBlocks + ' LTC · ' : '') +
+      'last ' + since(d.blocks[0].at) + ' ago';
 
   const eta = (d.totalHashrate > 0 && netHash > 0) ? (60*netHash)/d.totalHashrate : 0;
   $('fEta').textContent = eta ? duration(eta) : '—';
@@ -1296,6 +1346,35 @@ async function tick(){
     ? (d.coinbaseValue/1e8).toLocaleString('en-US',{maximumFractionDigits:2}) + ' DOGE' : '—';
   $('nPing').textContent = d.nodeLatencyMs != null ? d.nodeLatencyMs + ' ms' : '—';
   $('nTemplate').textContent = d.templateAgeMs != null ? Math.round(d.templateAgeMs/1000) + 's' : '—';
+  // merged mining: the parent chain, and the odds on both
+  if(d.mergedMining && d.merged){
+    $('parentBox').hidden = false;
+    $('pHeight').textContent = d.merged.parentHeight != null ? d.merged.parentHeight.toLocaleString('en-US') : '—';
+    $('pDiff').textContent = compact(d.merged.parentDifficulty);
+    // Litecoin targets a block every 2.5 minutes, Dogecoin every 1. The
+    // conversion from difficulty to network hashrate depends on that interval,
+    // and using Dogecoin's for both would overstate Litecoin's hashrate by 2.5x.
+    const pNet = d.merged.parentDifficulty > 0 ? (d.merged.parentDifficulty * Math.pow(2,32))/150 : 0;
+    const ph = hashrate(pNet);
+    $('pHash').textContent = ph.n + ' ' + ph.u;
+    const pShareOf = pNet > 0 ? d.totalHashrate/pNet : 0;
+    $('pShare').textContent = pShareOf > 0 && pShareOf < 1 ? '1 in ' + compact(1/pShareOf) : '—';
+    $('pReward').textContent = d.merged.parentReward != null
+      ? (d.merged.parentReward/1e8).toLocaleString('en-US',{maximumFractionDigits:4}) + ' LTC' : '—';
+    $('pAddress').textContent = d.merged.parentPayoutAddress || '—';
+
+    const year = 365*24*3600;
+    $('pOdds').textContent = pNet > 0
+      ? percent(blockProbability(d.totalHashrate, pNet, year)) : '—';
+    const dNet = diffForOdds ? (diffForOdds * Math.pow(2,32))/60 : 0;
+    $('dOdds').textContent = dNet > 0
+      ? percent(blockProbability(d.totalHashrate, dNet, year)) : '—';
+    $('parentNote').textContent =
+      'Every hash is offered to both chains at once. A share that meets Litecoin\'s target becomes a Litecoin block; one that meets Dogecoin\'s becomes a Dogecoin block; a very lucky one is both. Neither costs the other anything — this is why rented hashpower is priced off the two together.';
+  } else {
+    $('parentBox').hidden = true;
+  }
+
   $('diffNote').textContent =
     'Dogecoin retargets difficulty on every block, damped to an eighth of the deviation, so the instantaneous figure swings by tens of percent within minutes. The odds above use the recent average instead, which is the honest basis for a long-run estimate.';
 
@@ -1351,6 +1430,15 @@ async function tick(){
   $('cUser').textContent = d.payoutAddress || '(no address configured)';
   // The username field means different things depending on one setting, and a
   // dashboard that describes the other one is worse than saying nothing.
+  // The rented profile means the port is meant to be reachable from the
+  // internet. That is a state worth seeing every time you open the page, so it
+  // is not left to be remembered.
+  if(d.profile === 'rented'){
+    $('exposureNote').className = 'notice show';
+    $('exposureNote').textContent = 'Running in the rented-hashpower profile. This is for a stratum port that is open to the internet — close the port forward and switch back to the home profile when the order ends.';
+  } else {
+    $('exposureNote').className = 'notice';
+  }
   $('connectNote').textContent = d.lockPayoutAddress
     ? 'Every block pays the address above, whatever a worker puts in the username field — that is what LOCK_PAYOUT_ADDRESS does, and it is why this port is safe to expose. Use the username for a name you will recognise in the table. The password is ignored; miners insist on one, so send anything.'
     : 'Put a Dogecoin address in the username field and any block that worker finds pays that address. Anything else falls back to the address configured for this app. The password is ignored — miners insist on one, so send anything.';
@@ -1367,16 +1455,24 @@ async function tick(){
     $('blocks').innerHTML = '<p class="empty">No blocks yet. At solo difficulty that is the expected state for a long time — the expected wait above is the honest number, and it is an average, not a countdown.</p>';
   } else {
     const SHOWN = 12;
-    let h = '<table><thead><tr><th>Height</th><th>Status</th><th class="hide">Worker</th>' +
+    // The chain column only appears when there is more than one chain in play.
+    // On a Dogecoin-only pool it would be a column of identical values.
+    const anyLtc = d.blocks.some((b) => chainOf(b) === 'LTC');
+    let h = '<table><thead><tr><th>Height</th>' + (anyLtc ? '<th>Chain</th>' : '') +
+            '<th>Status</th><th class="hide">Worker</th>' +
             '<th class="r">Reward</th><th class="r">When</th></tr></thead><tbody>';
     for(const b of d.blocks.slice(0, SHOWN)){
       // hasOwnProperty, not a bare lookup: `status: "constructor"` would
       // otherwise render the source of Object into the page.
       const tag = Object.prototype.hasOwnProperty.call(TAGS, b.status) ? TAGS[b.status] : TAGS.submitting;
       h += '<tr><td class="num">' + b.height + '</td>' +
+        (anyLtc ? '<td>' + chainOf(b) + '</td>' : '') +
         '<td>' + tag + (b.error ? '<div class="wsub">' + esc(b.error) + '</div>' : '') + '</td>' +
         '<td class="hide"><div class="wname">' + esc(b.worker) + '</div></td>' +
-        '<td class="num r">' + (b.reward/1e8).toFixed(2) + '</td>' +
+        // The unit travels with the number. Two rows reading "25.00" and
+        // "10000.00" with no unit is how a Litecoin block gets mistaken for a
+        // disappointing Dogecoin one.
+        '<td class="num r">' + (b.reward/1e8).toFixed(2) + ' <span class="unit">' + chainOf(b) + '</span></td>' +
         '<td class="num r">' + since(b.at) + '</td></tr>';
     }
     h += '</tbody></table>';

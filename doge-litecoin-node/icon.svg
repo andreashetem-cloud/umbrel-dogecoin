@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="coin" cx="35%" cy="28%" r="80%">
+      <stop offset="0%" stop-color="#f2f5f8"/>
+      <stop offset="45%" stop-color="#cdd4dc"/>
+      <stop offset="100%" stop-color="#8d97a3"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#6d7883"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="124" fill="url(#rim)"/>
+  <circle cx="128" cy="128" r="114" fill="url(#coin)"/>
+  <circle cx="128" cy="128" r="114" fill="none" stroke="#6d7883" stroke-opacity="0.35" stroke-width="2"/>
+  <!--
+    A plain silver coin with a stylised Ł: the stem leans, the foot squares off
+    at the bottom right and one diagonal bar crosses the stem. Drawn from
+    scratch rather than traced from the Litecoin Foundation's mark, which is a
+    trademark and not ours to ship.
+  -->
+  <g fill="#39414b">
+    <path d="M118 60h36l-24 116h-36z"/>
+    <path d="M94 152h84l-8 36H86z"/>
+    <path d="M74 118l86-22 7 30-86 22z"/>
+  </g>
+</svg>

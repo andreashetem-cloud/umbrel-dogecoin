@@ -1,7 +1,12 @@
 'use strict';
 
 /**
- * Dogecoin Node dashboard for Umbrel.
+ * Node dashboard for Umbrel.
+ *
+ * One image serves every coin in this store: the chain-specific bits are the
+ * RPC endpoint, the data directory and a handful of words, all of which come
+ * from the environment. Defaults are Dogecoin's, so an app that sets none of
+ * the branding variables behaves exactly as this dashboard always has.
  *
  * Node.js standard library only — no npm dependencies, so there is no supply
  * chain to audit beyond Node itself.
@@ -24,6 +29,47 @@ const P2P_PORT = Number(process.env.P2P_PORT || 22556);
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const CHAIN_DIR = process.env.CHAIN_DIR || path.join(DATA_DIR, '.dogecoin');
 const DEVICE_HOST = process.env.DEVICE_DOMAIN_NAME || 'umbrel.local';
+
+// ---------------------------------------------------------------------------
+// Branding
+//
+// These land in HTML text nodes AND inside single-quoted JavaScript string
+// literals in the page, so anything that could close either context is
+// stripped rather than escaped: an operator typo in a compose file should
+// produce an ugly title, never a script injection. The length cap keeps a
+// pasted essay from wrecking the header layout.
+// ---------------------------------------------------------------------------
+function brand(name, fallback) {
+  const raw = String(process.env[name] || '').trim();
+  const clean = raw.replace(/[<>"'`&\\\r\n]/g, '').slice(0, 48);
+  return clean || fallback;
+}
+
+// Colours end up inside a CSS rule, where a value like "red;}body{…" would be
+// a stylesheet injection, so they are matched against a hex literal instead of
+// merely being stripped.
+function accent(name, fallback) {
+  const raw = String(process.env[name] || '').trim();
+  return /^#[0-9a-fA-F]{3,8}$/.test(raw) ? raw : fallback;
+}
+
+const COIN_NAME = brand('COIN_NAME', 'Dogecoin');
+const BRANDING = {
+  __COIN_NAME__: COIN_NAME,
+  __CORE_NAME__: brand('CORE_NAME', `${COIN_NAME} Core`),
+  __DAEMON_NAME__: brand('DAEMON_NAME', 'dogecoind'),
+  // Rendered as the coin's logo in the header.
+  __COIN_GLYPH__: brand('COIN_GLYPH', 'Ð'),
+  __CHAIN_SIZE_HINT__: brand('CHAIN_SIZE_HINT', 'roughly 150 GB'),
+  // Shown in the "the node is unreachable" message, so it has to be the
+  // container the user would actually run `docker logs` against.
+  __DAEMON_CONTAINER__: brand('DAEMON_CONTAINER', 'doge-dogecoin-node_dogecoind_1'),
+  // Dogecoin gold, and the two shades the logo gradient and progress bar are
+  // built from.
+  __ACCENT__: accent('ACCENT', '#c2a633'),
+  __ACCENT_SOFT__: accent('ACCENT_SOFT', '#e3c95c'),
+  __ACCENT_DEEP__: accent('ACCENT_DEEP', '#8f7a1f'),
+};
 
 // Every Umbrel app shares one docker network, so this container is reachable
 // from every other installed app. Requests for the RPC password are therefore
@@ -53,7 +99,8 @@ const ALLOWED_METHODS = new Set([
   'getmininginfo',
   'getpeerinfo',
   'getnettotals',
-  // Deliberately no `uptime`: Dogecoin Core 1.14 does not implement it.
+  // Deliberately no `uptime`: Dogecoin Core 1.14 does not implement it, and
+  // this allowlist is shared with the coins that do.
 ]);
 
 // ---------------------------------------------------------------------------
@@ -333,7 +380,12 @@ function sendJson(res, code, payload) {
   res.end(body);
 }
 
-const INDEX_TEMPLATE = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+// Branding is fixed for the life of the process, so it is baked in once here
+// and only the nonce is substituted per request.
+const INDEX_TEMPLATE = Object.entries(BRANDING).reduce(
+  (html, [token, value]) => html.replaceAll(token, value),
+  fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+);
 
 function sendIndex(res) {
   const nonce = crypto.randomBytes(16).toString('base64');
@@ -522,7 +574,7 @@ server.headersTimeout = 20000;
 server.requestTimeout = 30000;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Dogecoin dashboard listening on :${PORT} (RPC ${RPC_HOST}:${RPC_PORT})`);
+  console.log(`${COIN_NAME} dashboard listening on :${PORT} (RPC ${RPC_HOST}:${RPC_PORT})`);
 });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {

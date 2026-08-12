@@ -43,12 +43,20 @@ jobs:
           - name: umbrel-dogecoin-core
             context: images/core
             tag: "1.14.9-1"
+          # 1.1.0 is the first dashboard build whose branding comes from the
+          # environment, which is what lets the Litecoin app reuse it. The
+          # Dogecoin Node app deliberately stays pinned to 1.0.0: its behaviour
+          # is identical either way, and republishing a tag in place is exactly
+          # what the note above forbids.
           - name: umbrel-dogecoin-ui
             context: images/ui
-            tag: "1.0.0"
+            tag: "1.1.0"
+          - name: umbrel-litecoin-core
+            context: images/ltc-core
+            tag: "0.21.4-1"
           - name: umbrel-dogecoin-stratum
             context: images/stratum
-            tag: "1.2.0"
+            tag: "1.3.0"
     steps:
       - uses: actions/checkout@v4
 

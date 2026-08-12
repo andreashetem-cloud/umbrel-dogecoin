@@ -28,9 +28,16 @@ class Job {
    * @param {object} template    raw getblocktemplate result
    * @param {Buffer} payoutScript scriptPubKey the block reward pays to
    * @param {string} tag         short marker embedded in the coinbase
+   * @param {object} opts        subclass data. Assigned BEFORE _buildCoinbase
+   *                             runs, because that call happens inside this
+   *                             constructor and a subclass's own field
+   *                             initialisers do not run until after it — so an
+   *                             override reading `this.something` would see
+   *                             undefined. MergedJob needs the aux block here.
    */
-  constructor(id, template, payoutScript, tag = '/umbrel-doge-solo/') {
+  constructor(id, template, payoutScript, tag = '/umbrel-doge-solo/', opts = {}) {
     this.id = id;
+    this.opts = opts;
     this.template = template;
     this.height = template.height;
     this.createdAt = Date.now();
@@ -250,6 +257,12 @@ function judgeShare(job, prepared, powHash, shareTargets) {
   const shareDiff = u.difficultyFromTarget(powValue === 0n ? 1n : powValue);
 
   const isBlockCandidate = powValue <= job.networkTarget;
+  // Merged mining: the same hash is judged against the aux chain's target as
+  // well, and the two are independent — Dogecoin's is usually the harder one,
+  // but which one a given share meets is decided per share, not per job.
+  // Undefined outside merged mode, so this is dead weight in the Dogecoin-only
+  // path rather than a change to it.
+  const isAuxCandidate = job.auxTarget != null && powValue <= job.auxTarget;
   const targets = Array.isArray(shareTargets) ? shareTargets : [shareTargets];
   const meetsShareTarget = targets.some((t) => t != null && powValue <= t);
 
@@ -258,11 +271,11 @@ function judgeShare(job, prepared, powHash, shareTargets) {
   // right authority on whether the timestamp is acceptable — not this
   // container's clock, which may simply be running behind the miner's.
   // Anything else risks throwing a real block away over a few seconds of drift.
-  if (prepared.ntimeTooFarAhead && !isBlockCandidate) {
+  if (prepared.ntimeTooFarAhead && !isBlockCandidate && !isAuxCandidate) {
     return { ok: false, reason: 'ntime beyond the 2-hour consensus limit', shareDiff };
   }
 
-  if (!isBlockCandidate && !meetsShareTarget) {
+  if (!isBlockCandidate && !isAuxCandidate && !meetsShareTarget) {
     return { ok: false, reason: 'low difficulty share', shareDiff };
   }
 
@@ -270,7 +283,12 @@ function judgeShare(job, prepared, powHash, shareTargets) {
     ok: true,
     shareDiff,
     isBlockCandidate,
+    isAuxCandidate,
     header,
+    // The parent coinbase, needed to assemble the auxpow proof. Carried only
+    // when something is going to be submitted; a share is a hot path and this
+    // is a live reference into the buffers the validator just built.
+    coinbase: isBlockCandidate || isAuxCandidate ? coinbase : null,
     blockHex: isBlockCandidate ? job.serializeBlock(header, coinbase) : null,
     blockHash: u.reverseBuffer(u.sha256d(header)).toString('hex'),
   };
