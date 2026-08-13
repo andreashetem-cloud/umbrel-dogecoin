@@ -14,7 +14,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.3.1
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.3.3
     restart: on-failure
     logging: *default-logging
     # Docker's default is 10 seconds, and the shutdown handler waits up to 130
@@ -224,11 +224,17 @@ services:
       # That file is also the right place for the Litecoin RPC password, which
       # has no business being in a git repository.
       #
-      # Create it once (600, root-owned):
+      # Create it once, readable by the user umbrelOS starts apps as:
       #
       #     MERGED_MINING=1
-      #     LTC_PAYOUT_ADDRESS=L...            your Litecoin address (L/M/3)
-      #     LTC_RPC_PASSWORD=...               from the Litecoin Node app
+      #     LTC_PAYOUT_ADDRESS=L...
+      #     LTC_RPC_PASSWORD=...
+      #
+      # One key per line and nothing after the value — there is no support for
+      # trailing comments, so `LTC_RPC_PASSWORD=abc   # from the node app`
+      # would make the password literally "abc   # from the node app" and every
+      # RPC call would 401. Surrounding whitespace and one layer of matching
+      # quotes are stripped; anything else is taken exactly as written.
       #
       # Anything left out keeps the default after the :- below, which is the
       # Dogecoin-only behaviour.

@@ -45,6 +45,7 @@ Recognised keys, all optional except the first:
 | `PAYOUT_ADDRESS` | — | Dogecoin address for block rewards. Required. |
 | `MINING_PROFILE` | `home` | `home` or `rented`; switches every limit at once. |
 | `MERGED_MINING` | `0` | `1` to mine Dogecoin and Litecoin from the same hashes. |
+| `POLL_INTERVAL_SECONDS` | `2` | How often the Dogecoin aux block is refreshed. Floored at 0.5. |
 | `LTC_PAYOUT_ADDRESS` | — | Litecoin address (`L…`, `M…` or `3…`). Required when merged. |
 | `LTC_RPC_PASSWORD` | — | From the Litecoin Node app. Required when merged. |
 | `LTC_RPC_HOST` | `doge-litecoin-node_litecoind_1` | Only if your Litecoin node lives elsewhere. |
@@ -121,9 +122,14 @@ against assumptions:
 
 ## Configuration
 
-Everything is environment variables in `docker-compose.yml`. Editing the running
-copy under `~/umbrel/app-data/` works but is overwritten on update; change the
-repo and update the app to make it stick.
+Device-specific settings — the payout addresses, the merged-mining switch, the
+mining profile, the Litecoin RPC password, the poll interval — go in
+`~/umbrel/app-data/doge-dogecoin-solo/.env`, which survives app updates. See
+"Why `.env` and not `docker-compose.yml`" above for the full list.
+
+Everything else is an environment variable in `docker-compose.yml`. Editing the
+running copy under `~/umbrel/app-data/` works but is overwritten on the next
+update; change the repo and update the app to make it stick.
 
 After changing anything, stop and start the app — never restart it. `docker
 restart` gives a container 10 seconds and then kills it, ignoring

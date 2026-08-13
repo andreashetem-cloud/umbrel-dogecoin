@@ -207,12 +207,15 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
 /* The one thing a glance should answer: is this hashing for one chain or two?
    Everything else on this page is a number that looks the same either way. */
 .mmb{
-  display:inline-block;margin-left:12px;vertical-align:middle;
+  display:inline-block;vertical-align:middle;
   font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   padding:4px 9px;border-radius:999px;
   color:#0b0b0d;background:linear-gradient(90deg,#c2a633,#a6a9aa);
   white-space:nowrap;
 }
+/* Degraded: still merged, but only one chain is actually reachable. Amber
+   rather than the gold/silver gradient, so it does not read as "all well". */
+.mmb.degraded{background:#8a6d1f;color:#fff2cc}
 .mmb[hidden]{display:none}
 @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
 </style>
@@ -1174,6 +1177,11 @@ async function tick(){
   }catch(e){
     $('beacon').className = 'beacon off';
     $('mastMeta').textContent = 'dashboard unreachable';
+    // The badge is a claim about what the pool is doing, and a claim nobody is
+    // refreshing is worse than none: leaving it on a page whose data has
+    // stopped arriving would keep asserting "merged" long after the app was
+    // reconfigured or stopped.
+    $('mmBadge').hidden = true;
     return;
   }
   const hadStatus = !!lastStatus;
@@ -1188,6 +1196,10 @@ async function tick(){
   if(!d.ok){
     $('beacon').className = 'beacon off';
     $('mastMeta').textContent = 'not mining';
+    // Same reason as the fetch failure above, and this is the path taken when
+    // the app refuses to start after a configuration change — precisely when a
+    // stale "merged" badge would be a lie about the current setup.
+    $('mmBadge').hidden = true;
     notice.className = 'notice show bad';
     notice.textContent = d.error || 'The stratum server has not started.';
     return;
@@ -1361,7 +1373,16 @@ async function tick(){
   // node hiccups and `merged` is briefly absent, the pool is still a merged
   // pool, and a badge that blinks off would read as "it silently switched back
   // to Dogecoin-only" — the one thing people are anxious about here.
-  $('mmBadge').hidden = !d.mergedMining;
+  const mmb = $('mmBadge');
+  mmb.hidden = !d.mergedMining;
+  if(d.mergedMining){
+    // A merged pool whose Dogecoin node is unreachable keeps mining Litecoin,
+    // which is the right behaviour — but a badge still reading DOGE + LTC
+    // would be the page's most prominent statement and the one thing on it
+    // that is false. It says what is actually being mined right now.
+    mmb.textContent = d.auxError ? 'merged · LTC only' : 'merged · DOGE + LTC';
+    mmb.className = d.auxError ? 'mmb degraded' : 'mmb';
+  }
   if(d.mergedMining && d.merged){
     $('parentBox').hidden = false;
     $('pHeight').textContent = d.merged.parentHeight != null ? d.merged.parentHeight.toLocaleString('en-US') : '—';

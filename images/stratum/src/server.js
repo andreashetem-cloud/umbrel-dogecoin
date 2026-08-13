@@ -115,7 +115,15 @@ const config = {
   targetShareSeconds: num('TARGET_SHARE_SECONDS', 12),
   vardiffWindow: num('VARDIFF_WINDOW', 10),
   hashrateWindowMs: num('HASHRATE_WINDOW_SECONDS', 600) * 1000,
-  pollIntervalMs: num('POLL_INTERVAL_SECONDS', 5) * 1000,
+  // Two seconds, matching the compose default: in merged mode this poll is the
+  // ONLY way a new Dogecoin tip is noticed — createauxblock has no longpoll —
+  // so the interval is the average amount of doomed Dogecoin hashing per block.
+  //
+  // Floored at half a second. The value is settable from a hand-edited .env,
+  // and 0 would turn setInterval into a ~1ms loop: an unbounded
+  // getblocktemplate flood against the very node whose RPC threads everything
+  // else here is careful to protect.
+  pollIntervalMs: Math.max(0.5, num('POLL_INTERVAL_SECONDS', 2)) * 1000,
   jobRebuildMs: num('JOB_REBUILD_SECONDS', 30) * 1000,
   socketTimeoutMs: num('SOCKET_TIMEOUT_SECONDS', 900) * 1000,
   coinbaseTag: process.env.COINBASE_TAG || '/umbrel-doge-solo/',

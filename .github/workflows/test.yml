@@ -46,6 +46,32 @@ jobs:
       - name: Solo app .env loader suite
         run: bash ./test/solo_exports.sh
 
+      # The suites that need no daemon. The rest of test/ needs a regtest
+      # dogecoind and a regtest litecoind and runs on the maintainer machine.
+      # These cover address and block-serialisation bytes, the merged template
+      # ordering guard, the MWEB tail, the on-disk statistics format and its v1
+      # migration, and the Web Push signing — all pure functions of their
+      # input, and all previously covered by nothing at all in CI.
+      - name: Unit suite
+        run: node test/unit.js DU4KTk97aC46ZbXjdTpP9tFNYCrmuLZXLd ""
+
+      - name: Merged template ordering
+        run: node test/merged_ordering.js
+
+      - name: MWEB block serialisation
+        run: node test/mweb_serialisation.js
+
+      - name: Statistics persistence and v1 migration
+        run: |
+          node test/persistence.js
+          node test/migration.js
+
+      - name: Web Push suite
+        run: node test/push.js
+
+      - name: Manifest validation
+        run: python3 test/validate_manifest.py
+
       - name: Integration suite
         run: bash ./test/integration.sh
 
@@ -111,6 +137,14 @@ jobs:
           push: false
           cache-from: type=gha,scope=ltc-core
           cache-to: type=gha,mode=max,scope=ltc-core
+      - name: Build the stratum server (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: images/stratum
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=stratum
+          cache-to: type=gha,mode=max,scope=stratum
       - name: Build the dashboard (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:

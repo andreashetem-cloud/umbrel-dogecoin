@@ -27,8 +27,14 @@ const MAX_LINE_BYTES = 16 * 1024;
 // (clean_jobs false). Work returning from a proxy or a rented aggregator is
 // routinely older than that, and such a share was rejected as "job not found"
 // WITHOUT ever being hashed — so a block-winning share would have been thrown
-// away unexamined. Sixty covers ten minutes of rebuilds.
-const JOB_HISTORY = 60;
+// away unexamined.
+//
+// Sixty covered ten minutes when the template was polled every five seconds.
+// The merged-mining poll now runs every two, which is fast enough to observe
+// essentially every rebuild litecoind produces — Core regenerates its template
+// at most once every five seconds, so about twelve a minute — and sixty jobs
+// would be five minutes again. A hundred and twenty restores the ten.
+const JOB_HISTORY = 120;
 // How many superseded difficulty targets a client's in-flight work may still be
 // judged against.
 const RECENT_TARGETS = 4;
@@ -218,10 +224,19 @@ class Pool extends EventEmitter {
     }, this.config.pingIntervalMs);
     this.pingTimer.unref();
 
-    this.pollTimer = setInterval(
-      () => this.refreshTemplate('poll').catch(() => {}),
-      this.config.pollIntervalMs
-    );
+    // Skipped while a refresh is still in flight. Without this, a poll every
+    // two seconds against a node whose getblocktemplate occasionally takes
+    // longer than that stacks refreshes on top of each other, and it is the
+    // overlap — not the frequency — that lets an older result land after a
+    // newer one (see the ordering guard in onMergedTemplate).
+    this.pollTimer = setInterval(() => {
+      if (this.refreshInFlight) return;
+      this.refreshInFlight = true;
+      this.refreshTemplate('poll')
+        .catch(() => {})
+        .finally(() => { this.refreshInFlight = false; });
+    }, this.config.pollIntervalMs);
+    this.pollTimer.unref();
     this.longPollLoop();
     this.log(`stratum listening on 0.0.0.0:${this.config.stratumPort}`);
   }
@@ -632,7 +647,7 @@ class Pool extends EventEmitter {
         }s — Litecoin mining continues, Dogecoin blocks cannot be submitted`
       : null;
 
-    this.onMergedTemplate(parent, auxBlock, reason);
+    this.onMergedTemplate(parent, auxBlock, reason, askedAt);
   }
 
   // One place to record a template failure, so the "log it once" rule actually
@@ -656,7 +671,31 @@ class Pool extends EventEmitter {
     this.stats.templateError = err.message;
   }
 
-  onMergedTemplate(template, auxBlock, reason) {
+  onMergedTemplate(template, auxBlock, reason, askedAt = Date.now()) {
+    // Ordering, not just difference.
+    //
+    // The poll and the longpoll both call this, neither awaits the other, and
+    // an RPC that stalls can deliver its answer after a later one has already
+    // been applied. `isNewBlock` below tests INEQUALITY of the previous-block
+    // hash, so a late answer describing the PREVIOUS tip reads as "new block"
+    // and gets installed and broadcast with clean_jobs — putting every miner
+    // back on an orphaned parent until the next refresh. Dogecoin submissions
+    // would still succeed (Dogecoin never validates the parent chain), so the
+    // dashboard would look perfectly healthy while the Litecoin half mined a
+    // dead branch.
+    //
+    // A result that was requested BEFORE the installed job's request and that
+    // would move either chain backwards is therefore dropped. A genuine reorg
+    // to a lower height still installs: it arrives on a fetch started after
+    // the current job's, so the first condition is false.
+    if (
+      this.currentJob &&
+      askedAt < (this.currentJob.fetchedAt || 0) &&
+      (template.height < this.currentJob.height ||
+        (auxBlock && auxBlock.height < this.currentJob.auxHeight))
+    ) {
+      return;
+    }
     if (template.longpollid) this.lastLongpollId = template.longpollid;
 
     // EITHER tip moving invalidates the job. The aux hash covers the Dogecoin
@@ -676,6 +715,10 @@ class Pool extends EventEmitter {
 
     const id = (++this.jobCounter).toString(16).padStart(8, '0');
     const job = new MergedJob(id, template, this.ltcPayoutScript, this.config.coinbaseTag, auxBlock);
+    // When this job's data was ASKED for, not when it was built: the ordering
+    // guard above compares request times, and a slow RPC would otherwise make
+    // a stale answer look newer than the fresh one it overtook.
+    job.fetchedAt = askedAt;
     this.jobs.set(id, job);
     this.currentJob = job;
     // Dogecoin's difficulty, keyed on Dogecoin's tip: this is a Dogecoin app,

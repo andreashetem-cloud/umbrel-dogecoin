@@ -38,7 +38,14 @@ for _candidate in \
   "${HOME:-/home/umbrel}/umbrel/app-data/doge-dogecoin-solo/.env" \
   "/home/umbrel/umbrel/app-data/doge-dogecoin-solo/.env"; do
   # The leading /.env case: an unset APP_DATA_DIR must not match "/.env".
-  if [ "${_candidate}" != "/.env" ] && [ -f "${_candidate}" ]; then
+  #
+  # -r as well as -f, deliberately. umbrelOS sources this under
+  # `set -euo pipefail`, and a redirect that cannot open the file makes the
+  # `while` fail, which under -e exits the shell that is starting the apps —
+  # so a .env left root-owned 600 while the start script runs as `umbrel`
+  # would not just skip this app's settings, it could take down the app start
+  # itself. Unreadable is treated exactly like absent.
+  if [ "${_candidate}" != "/.env" ] && [ -f "${_candidate}" ] && [ -r "${_candidate}" ]; then
     _solo_env_file="${_candidate}"
     break
   fi
@@ -50,6 +57,14 @@ if [ -n "${_solo_env_file}" ]; then
     # otherwise yields an address with a trailing carriage return, which fails
     # base58 validation with a message that points nowhere near the cause.
     _line="${_line%$'\r'}"
+    # A UTF-8 BOM, which the same editors that produce CRLF also produce, would
+    # otherwise make the first key "﻿PAYOUT_ADDRESS" — not in the
+    # allowlist, so silently dropped, and the app then refuses to start
+    # complaining about an address the user can plainly see in the file.
+    _line="${_line#$'\xef\xbb\xbf'}"
+    # Leading whitespace first, so an indented `export FOO=bar` is recognised
+    # rather than silently ignored.
+    _line="${_line#"${_line%%[![:space:]]*}"}"
     case "${_line}" in
       ''|'#'*) continue ;;
       export\ *) _line="${_line#export }" ;;
@@ -58,12 +73,21 @@ if [ -n "${_solo_env_file}" ]; then
     _value="${_line#*=}"
     # A line without '=' leaves key and value identical; skip it.
     [ "${_key}" = "${_line}" ] && continue
-    # Trim surrounding whitespace on the key only. Values are taken verbatim
-    # apart from one layer of matching quotes, because a payout address with a
-    # space in it is a typo we want the app to reject loudly, not one this
-    # script silently repairs.
     _key="${_key#"${_key%%[![:space:]]*}"}"
     _key="${_key%"${_key##*[![:space:]]}"}"
+    # Surrounding whitespace is trimmed from the VALUE too, before quotes are
+    # stripped. An earlier version left it verbatim on the theory that a value
+    # with a space in it is a typo the app should reject loudly. That holds for
+    # the addresses — they are checksum-validated and a bad one stops the app —
+    # but not for the switch: MERGED_MINING is compared with === '1', so a
+    # trailing space on that line started the app cheerfully Dogecoin-only with
+    # no error anywhere. Silently mining one chain instead of two is the exact
+    # failure this whole file exists to prevent.
+    #
+    # Whitespace INSIDE a value survives, so a pasted address with a space in
+    # the middle still fails validation loudly, as intended.
+    _value="${_value#"${_value%%[![:space:]]*}"}"
+    _value="${_value%"${_value##*[![:space:]]}"}"
     case "${_value}" in
       \"*\") _value="${_value#\"}"; _value="${_value%\"}" ;;
       \'*\') _value="${_value#\'}"; _value="${_value%\'}" ;;
