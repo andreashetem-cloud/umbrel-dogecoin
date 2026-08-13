@@ -17,10 +17,43 @@ losing it costs you a reconnect.
 1. Install the Dogecoin Node app first and let it finish syncing. This app
    declares it as a dependency, which is what makes the node's RPC credentials
    available here.
-2. Set `PAYOUT_ADDRESS` in `docker-compose.yml` to a Dogecoin address you
-   control. The app refuses to start without one, and validates the checksum —
-   a typo would otherwise mean mining a reward nobody can spend.
+2. Create `~/umbrel/app-data/doge-dogecoin-solo/.env` on the device with a
+   Dogecoin address you control:
+
+   ```
+   PAYOUT_ADDRESS=D...
+   ```
+
+   The app refuses to start without one, and validates the checksum — a typo
+   would otherwise mean mining a reward nobody can spend.
 3. Point your miners at `stratum+tcp://<your-umbrel-ip>:22557`. Any password.
+
+### Why `.env` and not `docker-compose.yml`
+
+umbrelOS regenerates `app-data/<app>/docker-compose.yml` from the app store on
+every install and every update, so a setting typed there survives until the next
+update and then vanishes. It never touches `.env`. `exports.sh` reads that file
+and hands the values to the compose file, so the same settings come back after
+an update instead of reverting to the defaults — which for merged mining means
+the difference between still mining two chains in the morning and quietly
+mining one.
+
+Recognised keys, all optional except the first:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `PAYOUT_ADDRESS` | — | Dogecoin address for block rewards. Required. |
+| `MINING_PROFILE` | `home` | `home` or `rented`; switches every limit at once. |
+| `MERGED_MINING` | `0` | `1` to mine Dogecoin and Litecoin from the same hashes. |
+| `LTC_PAYOUT_ADDRESS` | — | Litecoin address (`L…`, `M…` or `3…`). Required when merged. |
+| `LTC_RPC_PASSWORD` | — | From the Litecoin Node app. Required when merged. |
+| `LTC_RPC_HOST` | `doge-litecoin-node_litecoind_1` | Only if your Litecoin node lives elsewhere. |
+| `LTC_RPC_PORT` | `9332` | |
+| `LTC_RPC_USER` | `umbrel` | |
+
+Anything else in the file is ignored on purpose: `exports.sh` is sourced into
+umbrelOS's own shell while it starts apps, so a stray `PATH=` line there must
+not be able to reach outside this app.
 
 Put a Dogecoin address in the **username** field and blocks that worker finds
 pay to that address instead of the configured one. That is how these small

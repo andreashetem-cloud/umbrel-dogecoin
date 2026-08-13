@@ -204,6 +204,16 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
   svg{min-height:150px}
   th.r,td.r{padding-left:10px}
 }
+/* The one thing a glance should answer: is this hashing for one chain or two?
+   Everything else on this page is a number that looks the same either way. */
+.mmb{
+  display:inline-block;margin-left:12px;vertical-align:middle;
+  font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  padding:4px 9px;border-radius:999px;
+  color:#0b0b0d;background:linear-gradient(90deg,#c2a633,#a6a9aa);
+  white-space:nowrap;
+}
+.mmb[hidden]{display:none}
 @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
 </style>
 </head>
@@ -211,7 +221,7 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
 <div class="wrap">
 
   <div class="mast">
-    <h1><span class="beacon" id="beacon"></span>Solo mining</h1>
+    <h1><span class="beacon" id="beacon"></span>Solo mining<span class="mmb" id="mmBadge" hidden>merged · DOGE + LTC</span></h1>
     <div class="meta" id="mastMeta">connecting</div>
   </div>
 
@@ -1347,6 +1357,11 @@ async function tick(){
   $('nPing').textContent = d.nodeLatencyMs != null ? d.nodeLatencyMs + ' ms' : '—';
   $('nTemplate').textContent = d.templateAgeMs != null ? Math.round(d.templateAgeMs/1000) + 's' : '—';
   // merged mining: the parent chain, and the odds on both
+  // The badge follows mergedMining alone, not the template: when the Litecoin
+  // node hiccups and `merged` is briefly absent, the pool is still a merged
+  // pool, and a badge that blinks off would read as "it silently switched back
+  // to Dogecoin-only" — the one thing people are anxious about here.
+  $('mmBadge').hidden = !d.mergedMining;
   if(d.mergedMining && d.merged){
     $('parentBox').hidden = false;
     $('pHeight').textContent = d.merged.parentHeight != null ? d.merged.parentHeight.toLocaleString('en-US') : '—';

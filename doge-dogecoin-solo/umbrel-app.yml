@@ -1,17 +1,19 @@
 manifestVersion: 1
 id: doge-dogecoin-solo
 category: bitcoin
-name: Dogecoin Solo Mining
-version: "1.3.0"
-tagline: Point your scrypt miners at your own Dogecoin node
+name: Dogecoin + Litecoin Solo Mining
+version: "1.3.1"
+tagline: Solo mine Dogecoin, or merge-mine Dogecoin and Litecoin, on your own nodes
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
 
 
-  BEFORE YOU INSTALL: set PAYOUT_ADDRESS in this app's docker-compose.yml to a Dogecoin address you
-  control. The app deliberately refuses to mine without one, so that it can never build a block whose
-  reward nobody can spend. Set it in the app store repository rather than on the device — an edit to
-  the running copy is replaced the next time the app updates.
+  BEFORE YOU INSTALL: put a Dogecoin address you control in a file called .env in this app's data
+  directory on the device — ~/umbrel/app-data/doge-dogecoin-solo/.env — containing the single line
+  PAYOUT_ADDRESS=D... The app deliberately refuses to mine without one, so that it can never build a
+  block whose reward nobody can spend. Use .env rather than docker-compose.yml: umbrelOS regenerates
+  that file from the app store on every update, and .env is left alone. Merged mining and the mining
+  profile are configured the same way; the comments in docker-compose.yml list every key.
 
 
   Your miners connect to this app instead of to somebody else's pool. Every block template comes from
@@ -52,6 +54,15 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  Settings now survive an app update. Everything device-specific — the payout addresses,
+  the merged-mining switch, the Litecoin RPC password, the mining profile — is read from
+  .env in the app's data directory instead of from docker-compose.yml, which umbrelOS
+  regenerates from the app store on every update. Before this, updating the app quietly
+  turned merged mining back off. The dashboard also carries a MERGED · DOGE + LTC badge
+  whenever merged mining is on, so which mode you are in is visible at a glance rather
+  than inferred from the log.
+
+
   Merged mining. With the Litecoin Node app installed, the same hashes can now win on
   BOTH chains: your miners hash Litecoin headers carrying a commitment to a Dogecoin block,
   which is how Dogecoin has been mined since 2014. A share meeting Litecoin's target becomes

@@ -14,7 +14,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.3.0
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.3.1
     restart: on-failure
     logging: *default-logging
     # Docker's default is 10 seconds, and the shutdown handler waits up to 130
@@ -57,8 +57,16 @@ services:
       # A worker may override this by putting its own address in the stratum
       # username field. Get this wrong and a found block pays a stranger, so
       # the app refuses to start until it is set and passes checksum validation.
+      #
+      # Set it in ~/umbrel/app-data/doge-dogecoin-solo/.env on the device:
+      #
+      #     PAYOUT_ADDRESS=D...
+      #
+      # An address written here instead is wiped by the next app update, and
+      # the app then refuses to start — which is the safe failure, but a
+      # failure all the same. See the long note further down about `.env`.
       # ------------------------------------------------------------------
-      PAYOUT_ADDRESS: "DU4KTk97aC46ZbXjdTpP9tFNYCrmuLZXLd"
+      PAYOUT_ADDRESS: "${PAYOUT_ADDRESS:-}"
 
       # --- share difficulty ---------------------------------------------
       # Stratum difficulty for scrypt: one share costs D * 2^16 hashes, NOT
@@ -157,7 +165,10 @@ services:
       # throws that half away, so the expected return is roughly 25% below what
       # you pay. It buys a real end-to-end test and a lottery ticket, not profit.
       # ---------------------------------------------------------------------
-      MINING_PROFILE: "home"
+      # Also read from .env, so switching to a rented order for a day and back
+      # again does not mean editing a file the next update overwrites:
+      #     MINING_PROFILE=rented
+      MINING_PROFILE: "${MINING_PROFILE:-home}"
 
       # ---------------------------------------------------------------------
       # Merged mining: Dogecoin AND Litecoin from the same hashes.
@@ -186,13 +197,37 @@ services:
       #      and paste it below. Treat it like a password, because it is one.
       #
       # Nothing about the Dogecoin-only path changes while this is off.
+      #
       # ---------------------------------------------------------------------
-      MERGED_MINING: "0"
-      # LTC_RPC_HOST: doge-litecoin-node_litecoind_1
-      # LTC_RPC_PORT: "9332"
-      # LTC_RPC_USER: "umbrel"
-      # LTC_RPC_PASSWORD: ""
-      # LTC_PAYOUT_ADDRESS: ""
+      # WHERE TO PUT THESE VALUES
+      #
+      # Not here. Every setting below is read from a file called `.env` in the
+      # app's data directory on the device:
+      #
+      #     ~/umbrel/app-data/doge-dogecoin-solo/.env
+      #
+      # umbrelOS regenerates THIS file from the app store on every install and
+      # every update, so anything typed here is lost the next time the app
+      # updates — silently, with merged mining simply off again the next
+      # morning. It does not create or touch `.env`, so settings there survive.
+      # That file is also the right place for the Litecoin RPC password, which
+      # has no business being in a git repository.
+      #
+      # Create it once (600, root-owned):
+      #
+      #     MERGED_MINING=1
+      #     LTC_PAYOUT_ADDRESS=L...            your Litecoin address (L/M/3)
+      #     LTC_RPC_PASSWORD=...               from the Litecoin Node app
+      #
+      # Anything left out keeps the default after the :- below, which is the
+      # Dogecoin-only behaviour.
+      # ---------------------------------------------------------------------
+      MERGED_MINING: "${MERGED_MINING:-0}"
+      LTC_RPC_HOST: "${LTC_RPC_HOST:-doge-litecoin-node_litecoind_1}"
+      LTC_RPC_PORT: "${LTC_RPC_PORT:-9332}"
+      LTC_RPC_USER: "${LTC_RPC_USER:-umbrel}"
+      LTC_RPC_PASSWORD: "${LTC_RPC_PASSWORD:-}"
+      LTC_PAYOUT_ADDRESS: "${LTC_PAYOUT_ADDRESS:-}"
     healthcheck:
       test: ["CMD", "node", "-e", "require('node:http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
