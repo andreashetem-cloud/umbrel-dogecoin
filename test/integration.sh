@@ -201,7 +201,14 @@ for method in getblockchaininfo getnetworkinfo getmempoolinfo getmininginfo getp
 done
 
 # Regression guard: Dogecoin Core 1.14 has no `uptime` RPC. Nothing may call it.
-if grep -rn "uptime" "${REPO_ROOT}/images" --include='*.js' --include='*.sh' \
+#
+# Matched as a QUOTED name — 'uptime' or "uptime" — because that is how an RPC
+# method is written here: rpc.call('uptime'). The bare substring also matched
+# process.uptime(), the Node built-in the solo app's health monitor uses for a
+# clock that cannot step, which turned a real regression guard into a failure
+# nobody could act on. A guard that cries wolf is one people learn to re-run
+# until it passes.
+if grep -rnE "['\"]uptime['\"]" "${REPO_ROOT}/images" --include='*.js' --include='*.sh' \
      | grep -vE ':[[:space:]]*(#|//|\*)' | grep -q .; then
   bad "nothing calls the non-existent 'uptime' RPC"
 else
