@@ -14,6 +14,7 @@ const crypto = require('node:crypto');
 const { Pool } = require('./pool');
 const { Store } = require('./store');
 const { PushService } = require('./push');
+const { HealthMonitor } = require('./health');
 
 const PORT = Number(process.env.PORT || 3000);
 const STRATUM_PORT = Number(process.env.STRATUM_PORT || 3333);
@@ -141,6 +142,32 @@ const config = {
   pingIntervalMs: num('PING_INTERVAL_SECONDS', 60) * 1000,
   lockPayoutAddress: process.env.LOCK_PAYOUT_ADDRESS === '1',
   profile: PROFILE_NAME in PROFILES ? PROFILE_NAME : 'home',
+
+  // --- watching the nodes ---------------------------------------------------
+  // On unless explicitly switched off: a second longpoll, against dogecoind's
+  // getblocktemplate, used purely as a "the aux tip has moved" signal. See
+  // Pool.auxLongPollLoop. Off falls back to the poll alone, which is what
+  // 1.3.x did.
+  auxLongpoll: process.env.AUX_LONGPOLL !== '0',
+  // How long something must be wrong before the phone rings. Not a poll
+  // interval — the check runs far more often than this.
+  //
+  // Floored at ten seconds, which is where a threshold stops describing an
+  // outage and starts describing one slow template. This is the only place the
+  // bound lives: HealthMonitor takes what it is given, so a floor here and a
+  // floor there could not drift apart.
+  alarmAfterMs: Math.max(10, num('ALARM_AFTER_SECONDS', 180)) * 1000,
+  // How long the pool may take to come up at all before that is an alarm.
+  // Longer than the threshold above by default and deliberately so: umbrelOS
+  // starts every app at once, and a Dogecoin node loading its block index from
+  // an SD card is legitimately unreachable for minutes after a reboot.
+  startupGraceMs: Math.max(10, num('STARTUP_GRACE_SECONDS', 300)) * 1000,
+  // How rarely a STANDING alarm is repeated. 0 disables the repeat.
+  alarmRepeatMs: num('ALARM_REPEAT_HOURS', 6) * 3600 * 1000,
+  // How long the pool may sit with no template arriving AND no node reporting
+  // an error — the wedge — before this process exits so the container's
+  // restart policy hands us a clean one. 0 disables it.
+  stallRestartMs: num('STALL_RESTART_MINUTES', 15) * 60000,
 };
 
 // A safety interlock, not a warning.
@@ -203,6 +230,83 @@ const push = new PushService(
 );
 push.load();
 
+// The thing that would have noticed the thirteen hours. It lives out here,
+// beside the push service and not inside the Pool, because the case it exists
+// for is the one where there is no Pool at all: with dogecoind unreachable,
+// merged mode refuses to start and main() below retries forever, so anything
+// living inside Pool would never run.
+const health = new HealthMonitor({
+  alarmAfterMs: config.alarmAfterMs,
+  startupGraceMs: config.startupGraceMs,
+  repeatMs: config.alarmRepeatMs,
+  restartAfterMs: config.stallRestartMs,
+  startedAt: Date.now(),
+});
+
+// One description of the world, shared by the watchdog, /health and
+// /api/status, so the three can never disagree about whether this pool is
+// mining.
+function healthInput() {
+  return {
+    startupError,
+    snapshot: snapshotOrNull(),
+    // Told apart deliberately. snapshotOrNull() swallows a throw and returns
+    // null, which is indistinguishable from "there is no pool" — and those two
+    // need opposite answers: one means the node apps are down, the other means
+    // this app is broken while the nodes are fine.
+    poolExists: pool !== null,
+    pending: pool ? pool.pending() : 0,
+    // A clock that cannot step. The Umbrel has no real-time clock: umbrelOS
+    // restores an approximate time at boot and NTP corrects it, by hours,
+    // minutes later — with these apps already running. Every threshold in the
+    // monitor is capped by this so a clock correction cannot manufacture or
+    // erase an outage.
+    uptimeMs: process.uptime() * 1000,
+  };
+}
+
+// Every fifteen seconds. Far more often than the alarm threshold, so the moment
+// a node comes back is noticed almost at once, and cheap enough that it does
+// not matter: snapshot() walks a handful of connected miners.
+const HEALTH_TICK_MS = 15000;
+
+function healthTick() {
+  const input = healthInput();
+  const now = Date.now();
+  let report;
+  try {
+    report = health.sample(now, input);
+  } catch (err) {
+    // The watchdog must never be the thing that takes the process down.
+    console.error('[health] check failed:', err.message);
+    return;
+  }
+
+  if (report.notify) {
+    console.log(`[health] ${report.notify.text}`);
+    // Payloadless, like the block notification: the service worker wakes,
+    // fetches /api/status and describes what is actually wrong at that moment
+    // rather than what was wrong when this was sent. See push.js.
+    push
+      .notifyAll(report.notify.kind === 'recovery' ? 'nodes recovered' : 'nodes unreachable')
+      .catch((err) => console.error('[push]', err.message));
+  }
+
+  if (health.shouldRestart(now, input)) {
+    // Deliberately the last resort, and deliberately narrow — see
+    // HealthMonitor.shouldRestart for why this fires only on a wedge and never
+    // during a node outage. Docker restarts a container that EXITS; a failing
+    // healthcheck on its own restarts nothing outside Swarm, so this exit is
+    // the only thing that can actually recover a stuck process.
+    console.error(
+      `[health] no block template for ${Math.round((input.snapshot.templateAgeMs || 0) / 60000)} ` +
+        'minutes while the nodes report no error at all — exiting so the container restarts clean'
+    );
+    try { store.save(true); } catch { /* nothing left to try */ }
+    process.exit(1);
+  }
+}
+
 // Is this POST from our own page, or from some other site the user happens to
 // have open?
 //
@@ -237,6 +341,55 @@ function sameOriginPost(req) {
   }
   const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   return type === 'application/json';
+}
+
+// Zero the share counters on request. Same guard as the notification
+// endpoints, and for a sharper reason: this one DESTROYS data. Umbrel's proxy
+// authenticates with a cookie the browser attaches to cross-site requests too,
+// so without the same-origin check any page the user happens to have open
+// could wipe their statistics with a single fetch.
+async function handleResetPost(req, res) {
+  const reply = (code, body) => {
+    res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+  if (!sameOriginPost(req)) {
+    return reply(403, { ok: false, error: 'cross-site request refused' });
+  }
+  const body = await readJsonBody(req);
+  if (!body) return reply(400, { ok: false, error: 'expected a small JSON object' });
+
+  // What to clear. The default is what someone asking for a reset means:
+  // shares and reject reasons, and the best share, which is the other figure a
+  // day of experimenting distorts. The charts are only cleared when asked for
+  // explicitly — they are the record of whether the miners were actually up,
+  // and that is worth keeping across a counter reset.
+  const all = body.scope === 'all';
+  const scope = {
+    counters: all || body.counters !== false,
+    best: all || body.best !== false,
+    history: all || body.history === true,
+  };
+
+  // Both halves, but only once the durable one has agreed to do anything.
+  //
+  // The store refuses an empty scope. Clearing the live counters first would
+  // mean a request that answers 400 and changes nothing on disk had still
+  // stamped `resetAt` in memory — so the dashboard would start labelling
+  // untouched lifetime totals "since reset", disagreeing with /api/history,
+  // until the next restart.
+  const result = store.reset(scope);
+  if (!result.ok) return reply(400, result);
+  if (pool) pool.resetStats(scope);
+  return reply(200, {
+    ok: true,
+    cleared: result.cleared,
+    before: result.before,
+    // Says out loud that a reset which could not reach the disk will not
+    // survive a restart, rather than letting the user find out later.
+    persisted: result.persisted,
+    resetAt: store.state.resetAt,
+  });
 }
 
 async function handlePushPost(req, res, pathname) {
@@ -336,6 +489,18 @@ const server = http.createServer((req, res) => {
   // depth costs nothing here. POST is allowed only for the notification
   // endpoints, which need it to receive a subscription.
   const PUSH_POST_PATHS = new Set(['/api/push/subscribe', '/api/push/unsubscribe', '/api/push/test']);
+  if (req.method === 'POST' && url.pathname === '/api/reset') {
+    handleResetPost(req, res).catch((err) => {
+      console.error('[reset]', err.message);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+      } else {
+        res.end();
+      }
+    });
+    return;
+  }
   if (req.method === 'POST' && PUSH_POST_PATHS.has(url.pathname)) {
     // A rejection here would leave the request hanging open forever and, with
     // no handler, take the process down as an unhandled rejection.
@@ -357,9 +522,24 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.pathname === '/health') {
-    const healthy = pool !== null && !startupError;
+    // This used to answer "is my own web server up?", which it always was —
+    // including for the thirteen hours when both node apps were switched off
+    // and nothing whatsoever was being mined. It now answers the question the
+    // name promises: is this pool getting work?
+    //
+    // evaluate() is pure, so asking it here cannot disturb the notification
+    // bookkeeping the watchdog owns.
+    const report = health.evaluate(Date.now(), healthInput());
+    const healthy = pool !== null && !startupError && report.level !== 'down';
     res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: healthy, error: startupError }));
+    res.end(
+      JSON.stringify({
+        ok: healthy,
+        error: startupError,
+        level: report.level,
+        alerts: report.alerts.map((a) => a.text),
+      })
+    );
     return;
   }
 
@@ -403,6 +583,9 @@ const server = http.createServer((req, res) => {
             return [name, { ...rest, sampleCount: list.length, avg24h }];
           })
         ),
+        // "Lifetime" is a claim, and after a reset it is the wrong one — so the
+        // timestamp travels with the figures it qualifies.
+        resetAt: s.resetAt || null,
         lifetime: {
           accepted: s.accepted,
           rejected: s.rejected,
@@ -472,11 +655,28 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/api/status') {
     const snap = snapshotOrNull();
+    // The alarms travel with the status, on BOTH branches. The dashboard and
+    // the service worker have to be able to explain a pool that never started,
+    // and that branch has no snapshot to hang anything off.
+    const report = health.evaluate(Date.now(), healthInput());
+    const alarm = {
+      health: report.level,
+      alerts: report.alerts.map((a) => ({ key: a.key, level: a.level, text: a.text, since: a.since })),
+      // Both of these come from the CONFIGURATION rather than from a snapshot,
+      // so they are the only things the dashboard can rely on when there is no
+      // pool — which is exactly the branch where it has to tell the user which
+      // node app to go and look at. Without it the alarm bar sends a merged
+      // pool whose Litecoin node is down to the Dogecoin app.
+      mergedMining: !!config.mergedMining,
+      resetAt: store.state.resetAt || null,
+    };
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     });
-    res.end(JSON.stringify(snap ? { ok: true, ...snap } : { ok: false, error: startupError }));
+    res.end(
+      JSON.stringify(snap ? { ok: true, ...snap, ...alarm } : { ok: false, error: startupError, ...alarm })
+    );
     return;
   }
 
@@ -594,6 +794,13 @@ async function main() {
     startupError = `the dashboard could not start: ${err.message}`;
   });
   server.listen(PORT, () => console.log(`[web] dashboard on :${PORT}`));
+
+  // Armed BEFORE the start loop below, and not inside it. A missing payout
+  // address returns early, and a node that never answers keeps the loop turning
+  // forever — both are exactly when someone needs to be told.
+  const healthTimer = setInterval(healthTick, HEALTH_TICK_MS);
+  // Never the reason the process stays alive; the HTTP server owns that.
+  healthTimer.unref();
 
   if (startupError) return;
 

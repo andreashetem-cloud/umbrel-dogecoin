@@ -26,6 +26,17 @@
 #     LTC_PAYOUT_ADDRESS=L...
 #     LTC_RPC_PASSWORD=...
 #
+# Since 1.4.0 the alarm settings live here too, and all of them have working
+# defaults — this list is only for changing them:
+#
+#     ALARM_AFTER_SECONDS=180     how long a node may be unreachable before
+#                                 the dashboard goes red and the phone rings
+#     STARTUP_GRACE_SECONDS=300   how long the pool may take to come up at all
+#     ALARM_REPEAT_HOURS=6        how rarely a standing alarm is repeated
+#     STALL_RESTART_MINUTES=15    exit-and-restart after a silent wedge; 0 off
+#     AUX_LONGPOLL=0              stop following dogecoin's tip by longpoll and
+#                                 go back to polling it alone
+#
 # Keys not listed in ALLOWED below are ignored on purpose. This file is sourced
 # into umbrelOS's own shell while it starts apps: a stray PATH= or
 # APP_DOGECOIN_NODE_RPC_PASS= line in a hand-edited .env must not be able to
@@ -93,7 +104,7 @@ if [ -n "${_solo_env_file}" ]; then
       \'*\') _value="${_value#\'}"; _value="${_value%\'}" ;;
     esac
     case "${_key}" in
-      PAYOUT_ADDRESS|MINING_PROFILE|MERGED_MINING|POLL_INTERVAL_SECONDS|LTC_RPC_HOST|LTC_RPC_PORT|LTC_RPC_USER|LTC_RPC_PASSWORD|LTC_PAYOUT_ADDRESS)
+      PAYOUT_ADDRESS|MINING_PROFILE|MERGED_MINING|POLL_INTERVAL_SECONDS|LTC_RPC_HOST|LTC_RPC_PORT|LTC_RPC_USER|LTC_RPC_PASSWORD|LTC_PAYOUT_ADDRESS|ALARM_AFTER_SECONDS|STARTUP_GRACE_SECONDS|ALARM_REPEAT_HOURS|STALL_RESTART_MINUTES|AUX_LONGPOLL)
         export "${_key}=${_value}"
         ;;
       *) : ;;

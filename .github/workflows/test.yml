@@ -58,6 +58,39 @@ jobs:
       - name: Merged template ordering
         run: node test/merged_ordering.js
 
+      - name: Node alarm state machine
+        run: node test/health.js
+
+      - name: Aux longpoll and the moved-tip window
+        run: node test/aux_longpoll.js
+
+      - name: Statistics reset
+        run: node test/reset.js
+
+      # A real Pool, started against mock nodes. Covers the wiring the unit
+      # suites cannot: that start() actually launches the aux longpoll, that a
+      # Dogecoin tip move reaches the miners in milliseconds, and that the loop
+      # gives itself up rather than tie up the node's RPC threads.
+      - name: Pool wiring
+        run: node test/pool_wiring.js
+
+      # The healthcheck against a pool that is actually running — the headline
+      # claim of this release, and the one no other suite can reach.
+      - name: Live healthcheck
+        run: node test/health_live.js
+
+      # Starts a real server against an RPC port nothing is listening on: the
+      # case where the pool never comes up at all, which is the one the alarm
+      # exists for and the one no in-pool check could ever see.
+      - name: Alarm HTTP surface
+        run: node test/health_http.js
+
+      # Proof that the suites above fail when the code is wrong. Two tests in
+      # this repo were once vacuous; this is what stops that from being found
+      # by accident again.
+      - name: Mutation testing
+        run: bash ./test/mutants.sh
+
       - name: MWEB block serialisation
         run: node test/mweb_serialisation.js
 
@@ -71,6 +104,15 @@ jobs:
 
       - name: Manifest validation
         run: python3 test/validate_manifest.py
+
+      # Against a real dogecoind, because the claims the aux longpoll rests on
+      # are claims about Dogecoin Core, not about our code: that a
+      # getblocktemplate longpoll wakes on a tip change, that createauxblock
+      # caches until then, and that submitauxblock answers "block hash unknown"
+      # for the aux block it has just discarded. Reuses the cached tarball the
+      # integration suite already downloads.
+      - name: Aux longpoll against a real dogecoind
+        run: bash ./test/aux_longpoll_regtest.sh
 
       - name: Integration suite
         run: bash ./test/integration.sh

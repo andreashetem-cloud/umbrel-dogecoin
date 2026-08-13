@@ -40,6 +40,12 @@ const JOB_HISTORY = 120;
 const RECENT_TARGETS = 4;
 // Connection-churn log lines allowed per minute before they are summarised.
 const CHURN_LOG_PER_MINUTE = 20;
+// How many aux longpolls may time out in a row before the loop gives up.
+// Each timeout leaves a worker thread parked inside dogecoind until its tip
+// moves — see the catch in auxLongPollLoop — and the node has eight.
+const AUX_LONGPOLL_MAX_TIMEOUTS = 3;
+// How long to wait after one, so the leak rate is bounded even below that cap.
+const AUX_LONGPOLL_TIMEOUT_BACKOFF_MS = 30000;
 
 // Safety limits get defaults here rather than only in the caller. A limit that
 // silently becomes `undefined` compares false against everything, which turns
@@ -116,7 +122,29 @@ class Pool extends EventEmitter {
       rejectReasons: {},
       blocks: [],
       templateError: null,
+      templateErrorKind: null,
+      // Dogecoin blocks we solved but could not hand in, because dogecoind had
+      // already discarded the aux block by the time the proof arrived. This is
+      // the cost of polling the aux tip instead of following it, so it is
+      // counted rather than merely logged: it is the only honest measure of
+      // whether the aux longpoll below is earning its keep.
+      auxTipMissed: 0,
+      auxTipMissedAt: null,
     };
+    // How often dogecoind's longpoll came back, and how often that was actually
+    // a new tip rather than a mempool update. Both are surfaced: zero tip moves
+    // on a running merged pool means the loop is not doing its job, which
+    // otherwise looks exactly like a quiet chain.
+    this.auxLongpollSignals = 0;
+    this.auxTipMoves = 0;
+    this.lastAuxTip = null;
+    // Set to a reason if the loop gave itself up; see auxLongPollLoop.
+    this.auxLongpollDisabled = null;
+    // Fields rather than bare constants so a test can drive the give-up path
+    // without waiting two minutes per timeout for a real one. Nothing in the
+    // app changes them.
+    this.auxLongpollMaxTimeouts = AUX_LONGPOLL_MAX_TIMEOUTS;
+    this.auxLongpollBackoffMs = AUX_LONGPOLL_TIMEOUT_BACKOFF_MS;
 
     // Seed the live counters from the durable history, so the dashboard shows
     // a continuous story across restarts rather than starting from zero.
@@ -130,6 +158,9 @@ class Pool extends EventEmitter {
       this.stats.bestShareDiff = s.bestShareDiff;
       this.stats.bestShareAt = s.bestShareAt;
       this.stats.firstStartedAt = s.firstStartedAt;
+      // Carried across restarts with everything else it labels. Without this a
+      // reboot would present freshly reset counters as lifetime totals again.
+      this.stats.resetAt = s.resetAt || null;
     }
   }
 
@@ -158,6 +189,15 @@ class Pool extends EventEmitter {
     // stop() sets this; without clearing it here, a Pool that was stopped and
     // started again would have a longpoll loop that exits immediately.
     this.stopped = false;
+    // Which run of this Pool the background loops belong to.
+    //
+    // Clearing `stopped` is not enough on its own. stop() cannot interrupt a
+    // longpoll that is already blocked in an RPC call for up to two minutes;
+    // when that call finally resolves, the old loop re-reads `stopped`, finds
+    // it false again, and carries on beside the new one — two loops, each
+    // holding a worker thread of a node that has eight. A generation stamp is
+    // the one thing an in-flight loop cannot mistake for its own.
+    this.generation = (this.generation || 0) + 1;
 
     await this.refreshTemplate('startup');
     await this.reconcileBlocks();
@@ -238,6 +278,7 @@ class Pool extends EventEmitter {
     }, this.config.pollIntervalMs);
     this.pollTimer.unref();
     this.longPollLoop();
+    if (this.wantsAuxLongpoll()) this.auxLongPollLoop();
     this.log(`stratum listening on 0.0.0.0:${this.config.stratumPort}`);
   }
 
@@ -526,6 +567,43 @@ class Pool extends EventEmitter {
     }
   }
 
+  // The live half of a statistics reset.
+  //
+  // The store holds the durable copy, but these counters are seeded from it at
+  // startup and then live in memory, and the dashboard reads THESE. Clearing
+  // only the file would show a zero for a few seconds and then the old number
+  // again on the next poll — which looks exactly like a reset that silently
+  // failed.
+  //
+  // Note what is left alone: `shareTimes`. It is not a statistic, it is the
+  // input to the hashrate estimate and to vardiff. Clearing it would drop every
+  // worker's hashrate to zero for minutes and hand vardiff a two-sample guess
+  // to retune from, so a cosmetic reset would briefly cost real difficulty
+  // accuracy. Blocks are untouched here for the reasons given in store.reset.
+  resetStats(scope = {}) {
+    // Nothing asked for, nothing stamped. A `resetAt` set by a request that
+    // cleared nothing would make the dashboard label lifetime totals "since
+    // reset" — a label that is worse than no label, because it is believed.
+    if (!scope.counters && !scope.best && !scope.history) return false;
+    if (scope.counters) {
+      this.stats.accepted = 0;
+      this.stats.rejected = 0;
+      this.stats.rejectReasons = {};
+      for (const c of this.clients.values()) {
+        c.accepted = 0;
+        c.rejected = 0;
+        c.rejectReasons = {};
+      }
+    }
+    if (scope.best) {
+      this.stats.bestShareDiff = 0;
+      this.stats.bestShareAt = null;
+      for (const c of this.clients.values()) c.bestShareDiff = 0;
+    }
+    this.stats.resetAt = Date.now();
+    return true;
+  }
+
   // ---------------------------------------------------------------- templates
 
   async refreshTemplate(reason) {
@@ -544,10 +622,19 @@ class Pool extends EventEmitter {
           Math.round((Date.now() - (this.stats.templateFailedAt || Date.now())) / 1000)
         }s`);
       }
+      // The job FIRST, then the "everything is fine" bookkeeping.
+      //
+      // Written the other way round, a getblocktemplate that answers while job
+      // construction throws — a malformed template, an arithmetic edge in the
+      // target — would clear templateError and stamp a fresh lastTemplateAt on
+      // its way to failing. The pool would then look perfectly healthy while no
+      // miner had been given work since the last tip move. Here the throw is
+      // caught below and becomes a template error, which is what it is.
+      this.onTemplate(template, reason);
       this.stats.templateError = null;
+      this.stats.templateErrorKind = null;
       this.stats.templateFailedAt = null;
       this.stats.lastTemplateAt = Date.now();
-      this.onTemplate(template, reason);
     } catch (err) {
       // Forget the latency window while the node is unreachable, so the
       // dashboard cannot show a healthy round-trip next to a template error.
@@ -621,18 +708,6 @@ class Pool extends EventEmitter {
     }
 
     this.recordNodeLatency(Date.now() - askedAt);
-    if (this.stats.templateError) {
-      this.log(`the mining nodes are answering again after ${
-        Math.round((Date.now() - (this.stats.templateFailedAt || Date.now())) / 1000)
-      }s`);
-    }
-    this.stats.templateError = null;
-    this.stats.templateFailedAt = null;
-    // Cleared on success as well: without this the next failure is compared
-    // against a timestamp from the previous outage and suppressed.
-    this.templateLoggedAt = null;
-    this.templateLoggedMessage = null;
-    this.stats.lastTemplateAt = Date.now();
 
     // 2: the aux chain being unreachable is NOT a template error — the parent
     // job is fine and Litecoin mining continues — but it must not therefore be
@@ -647,7 +722,45 @@ class Pool extends EventEmitter {
         }s — Litecoin mining continues, Dogecoin blocks cannot be submitted`
       : null;
 
-    this.onMergedTemplate(parent, auxBlock, reason, askedAt);
+    // Build and broadcast the job BEFORE declaring the pool healthy.
+    //
+    // This call used to sit outside any try, after templateError had already
+    // been cleared and lastTemplateAt already stamped — and every caller
+    // swallows what it throws (the poll with `.catch(() => {})`, both longpoll
+    // loops with their own catch). So a persistent failure to turn a template
+    // into a job — a field the MergedJob constructor cannot read, a target that
+    // will not decode, an over-long coinbase — meant miners were never
+    // re-notified after a tip move, every share they returned was worthless,
+    // and the dashboard, the healthcheck and the alarm all reported a perfectly
+    // healthy pool indefinitely. The Dogecoin-only path never had this hole,
+    // because onTemplate is inside its try; now neither does this one.
+    try {
+      this.onMergedTemplate(parent, auxBlock, reason, askedAt);
+    } catch (err) {
+      this.noteTemplateFailure(
+        `the block template could not be turned into a job (${reason}): ${err.message}`,
+        err,
+        'unusable'
+      );
+      throw err;
+    }
+
+    if (this.stats.templateError) {
+      this.log(`the mining nodes are answering again after ${
+        Math.round((Date.now() - (this.stats.templateFailedAt || Date.now())) / 1000)
+      }s`);
+    }
+    this.stats.templateError = null;
+    this.stats.templateErrorKind = null;
+    this.stats.templateFailedAt = null;
+    // Cleared on success as well: without this the next failure is compared
+    // against a timestamp from the previous outage and suppressed.
+    this.templateLoggedAt = null;
+    this.templateLoggedMessage = null;
+    // Only now is it true that work reached the miners. This timestamp is what
+    // the health monitor reads as "the pool is getting work", so it has to mean
+    // a job was installed rather than merely that an RPC answered.
+    this.stats.lastTemplateAt = Date.now();
   }
 
   // One place to record a template failure, so the "log it once" rule actually
@@ -655,8 +768,13 @@ class Pool extends EventEmitter {
   // guard that only checks templateError logged on every iteration — about
   // thirty lines a minute, forever, which is exactly what pushes the BLOCK HEX
   // recovery line out of a rotating container log.
-  noteTemplateFailure(message, err) {
+  noteTemplateFailure(message, err, kind = 'unreachable') {
     const now = Date.now();
+    // What KIND of failure this is, so the dashboard and the alarm do not have
+    // to guess from the text. "Cannot reach the Litecoin node: merged coinbase
+    // scriptSig would be 148 bytes" is a sentence that sends someone to restart
+    // a node app that is answering perfectly well.
+    this.stats.templateErrorKind = kind;
     // Deduped on the MESSAGE as well as on time. Time alone means a flapping
     // node — fail, recover, fail again within the minute — logs the first
     // failure and then goes quiet, leaving "the mining nodes are answering
@@ -792,7 +910,8 @@ class Pool extends EventEmitter {
   }
 
   async longPollLoop() {
-    while (!this.stopped) {
+    const generation = this.generation;
+    while (!this.stopped && this.generation === generation) {
       // Track the longpollid from the LATEST template we received, not from the
       // current job. Those diverge: onTemplate deliberately keeps the existing
       // job when a new template brings nothing worth interrupting miners for.
@@ -815,10 +934,18 @@ class Pool extends EventEmitter {
           'getblocktemplate',
           [{ longpollid: id, rules: this.merged ? LTC_RULES : [] }]
         );
-        this.stats.templateError = null;
-        this.stats.lastTemplateAt = Date.now();
-        if (this.merged) await this.refreshMergedTemplate('longpoll', template);
-        else this.onTemplate(template, 'longpoll');
+        // Deliberately NOT stamping lastTemplateAt or clearing templateError
+        // here. A longpoll returning means an RPC answered, not that a job
+        // reached the miners — and the refresh below is what decides that. The
+        // health monitor reads those two fields, so setting them from here made
+        // a pool that answers but never installs a job look healthy forever.
+        if (this.merged) {
+          await this.refreshMergedTemplate('longpoll', template);
+        } else {
+          this.onTemplate(template, 'longpoll');
+          // Stamped after the job exists, for the reason above.
+          this.stats.lastTemplateAt = Date.now();
+        }
       } catch (err) {
         // A timeout here is normal and expected; anything else deserves a pause
         // so a broken node does not turn into a busy loop.
@@ -827,6 +954,160 @@ class Pool extends EventEmitter {
       // Belt and braces: however the call ended, never issue more than a few
       // longpolls per second. A single missed id must not cost the node its
       // RPC capacity.
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < this.config.minLongpollIntervalMs) {
+        await sleep(this.config.minLongpollIntervalMs - elapsed);
+      }
+    }
+  }
+
+  // Should the aux longpoll run at all?
+  //
+  // A method rather than an inline condition in start(), so it can be asserted
+  // from outside. Both halves matter and getting either wrong is quiet: in
+  // Dogecoin-only mode the main loop ALREADY longpolls dogecoind, so a second
+  // loop would hold a second RPC thread of a node that has eight, for nothing —
+  // and switching it off must actually switch it off, or AUX_LONGPOLL=0 is a
+  // setting that lies.
+  wantsAuxLongpoll() {
+    return !!(this.merged && this.config.auxLongpoll);
+  }
+
+  // The aux chain's tip, followed instead of polled.
+  //
+  // dogecoind offers no longpoll for createauxblock — that is why the aux side
+  // was polled at all — but it does offer one for getblocktemplate, and what we
+  // need from it is not the template. It is the EDGE: the instant its tip
+  // moves. Verified in Dogecoin Core 1.14.9, src/rpc/mining.cpp:
+  //
+  //   * getblocktemplate's longpoll waits on cvBlockChange while
+  //     `chainActive.Tip()->GetBlockHash() == hashWatchedChain`, so it returns
+  //     the moment the tip changes. If the tip has ALREADY moved past the id we
+  //     send, the loop is skipped and it returns immediately — which is why the
+  //     id is always taken from the newest answer and why the throttle below is
+  //     not optional.
+  //   * AuxMiningCreateBlock does `if (pindexPrev != chainActive.Tip()) {
+  //     mapNewBlock.clear(); ... }`, and AuxMiningSubmitBlock looks the hash up
+  //     in exactly that map, throwing "block hash unknown" when it is gone. So
+  //     every aux block issued for the old tip becomes worthless at precisely
+  //     the moment this longpoll returns.
+  //
+  // That is the whole 1.7%: at a two second poll, one second on average of
+  // every sixty second Dogecoin block was spent hashing an aux block that could
+  // no longer be handed in. Following the tip brings that down to the round
+  // trip of one RPC call.
+  //
+  // The poll stays. It is now a backstop rather than the mechanism, and it is
+  // what covers a longpoll that dies quietly.
+  async auxLongPollLoop() {
+    // Which start() this loop belongs to. stop() cannot interrupt an in-flight
+    // 120 second RPC, so a Pool that was stopped and started again would
+    // otherwise end up with two of these — each holding a thread of a node that
+    // has eight.
+    const generation = this.generation;
+    let timeouts = 0;
+    while (!this.stopped && this.generation === generation) {
+      const id = this.lastAuxLongpollId;
+      const startedAt = Date.now();
+      try {
+        // A dedicated client: this request blocks for a minute or more, and it
+        // must never be queued in front of a submitauxblock. In merged mode
+        // `longpollRpc` — the Dogecoin longpoll client — is otherwise unused,
+        // because the parent longpoll runs on the Litecoin one.
+        const template = await this.longpollRpc.call('getblocktemplate', [
+          id ? { longpollid: id, rules: [] } : { rules: [] },
+        ]);
+        const nextId = template && template.longpollid;
+        if (nextId) this.lastAuxLongpollId = nextId;
+        timeouts = 0;
+        // The tip is tracked from EVERY answer, including the id-collecting
+        // first one. Tracking it only from signalled returns means the first
+        // real tip move is the one that establishes the baseline and is
+        // therefore never counted — so the counter reads zero for the first
+        // Dogecoin block after every restart, which is precisely when someone
+        // is looking at it to see whether the loop works.
+        const tip = template && template.previousblockhash;
+        const moved = !!(tip && this.lastAuxTip && tip !== this.lastAuxTip);
+        if (tip) this.lastAuxTip = tip;
+        // The very first call carries no id, so it returns at once and says
+        // nothing about the tip having moved. Treating it as a signal would
+        // fire a redundant refresh at every startup.
+        if (id) {
+          this.auxLongpollSignals++;
+          // A return is not always a tip movement. Dogecoin's longpoll ALSO
+          // breaks out after about a minute when the mempool has changed,
+          // returning a template for the same tip — verified against the real
+          // binary: with one transaction sent and no block generated it
+          // returned after 60002ms with the tip unchanged. On mainnet the
+          // mempool is rarely quiet for a minute, so counting those as tip
+          // movements would roughly double the figure that is supposed to be
+          // the evidence this loop is working, and a broken loop would be
+          // indistinguishable from a busy mempool.
+          if (moved) this.auxTipMoves++;
+          // Note what is NOT done here: `auxUnavailableSince` is left alone,
+          // even though this call proves dogecoind is answering. That flag and
+          // its "answering again after Ns" log line belong to
+          // refreshMergedTemplate, which is about to run; clearing it here
+          // would delete the recovery message before it was ever printed.
+          try {
+            // The full merged refresh, so the parent template and the aux block
+            // are fetched together and the ordering guard in onMergedTemplate
+            // sees a single, correctly stamped fetch. One extra Litecoin
+            // getblocktemplate per Dogecoin block is a few milliseconds; a job
+            // rebuilt from a stale parent would be a dead branch.
+            await this.refreshMergedTemplate('aux-longpoll', null);
+          } catch {
+            // Already logged and recorded by refreshMergedTemplate. Falling out
+            // of this loop would silently return the aux side to polling.
+          }
+        }
+      } catch (err) {
+        // Expected, in order of how often they happen: our own timeout on a
+        // chain whose tip and mempool both sat still, "Dogecoin is not
+        // connected!" and "Dogecoin is downloading blocks..." from
+        // AuxMiningCheck's siblings in getblocktemplate. None is worth a log
+        // line of its own — refreshMergedTemplate already reports a dogecoind
+        // that has gone away — but all deserve a pause, so a node that refuses
+        // cannot become a busy loop.
+        if (err.code !== 'ETIMEDOUT') {
+          await sleep(2000);
+        } else {
+          // A timeout here is not free, and this is the one hazard this loop
+          // adds to the node.
+          //
+          // dogecoind's longpoll wait has NO overall timeout: it blocks on
+          // cvBlockChange until the tip changes or the mempool differs, and it
+          // does not notice that our socket has gone. So when we give up, the
+          // worker thread on the other side stays parked until the tip finally
+          // moves. Re-arming immediately therefore leaks one of the node's
+          // eight RPC threads per timeout — measured on a real regtest node
+          // with rpcthreads=4: after the fourth abort, every other call,
+          // including submitauxblock, timed out too.
+          //
+          // On mainnet this needs a Dogecoin tip AND mempool that are both
+          // still for minutes on end, which is already a sick chain. But the
+          // consequence is that a found block cannot be handed in, so it is
+          // bounded rather than argued about: back off hard, and after a few
+          // in a row give the loop up entirely and go back to the poll, which
+          // is correct if slower. Loudly, because a silent fallback is how the
+          // 1.7% comes back without anyone noticing.
+          timeouts++;
+          if (timeouts >= this.auxLongpollMaxTimeouts) {
+            this.auxLongpollDisabled =
+              `gave up after ${timeouts} longpolls in a row timed out against dogecoind`;
+            this.log(
+              `the Dogecoin longpoll timed out ${timeouts} times in a row; stopping it so it cannot ` +
+                'tie up the node\'s RPC threads, and falling back to polling the aux chain ' +
+                `every ${Math.round(this.config.pollIntervalMs / 1000)}s. Restart the app to try again.`
+            );
+            return;
+          }
+          await sleep(this.auxLongpollBackoffMs);
+        }
+      }
+      // The same belt and braces as the parent loop. A spent longpollid returns
+      // instantly, and an unthrottled retry would eat exactly the RPC capacity
+      // that submitauxblock needs at exactly the moment it needs it.
       const elapsed = Date.now() - startedAt;
       if (elapsed < this.config.minLongpollIntervalMs) {
         await sleep(this.config.minLongpollIntervalMs - elapsed);
@@ -1383,6 +1664,27 @@ class Pool extends EventEmitter {
         const ok = await this.submitRpc.call('submitauxblock', [auxHash, auxPowHex]);
         return ok === true ? null : 'dogecoind refused the auxpow proof';
       } catch (err) {
+        // One failure is not like the others. AuxMiningSubmitBlock looks the
+        // hash up in mapNewBlock and throws "block hash unknown" when it is not
+        // there — and AuxMiningCreateBlock empties that map the instant the tip
+        // moves. So this error means the aux block we solved was discarded
+        // before the proof arrived, and it can never come back: retrying spends
+        // a hundred seconds of the retry schedule on a certainty, while the
+        // Litecoin block from the same share is still being submitted on the
+        // other RPC client.
+        //
+        // Counted rather than merely logged. This is the number that says
+        // whether the aux longpoll is doing its job.
+        if (/block hash unknown/i.test(err.message)) {
+          this.stats.auxTipMissed++;
+          this.stats.auxTipMissedAt = Date.now();
+          this.log(
+            `the Dogecoin tip moved before the proof for height ${height} could be submitted; ` +
+              'dogecoind had already discarded that aux block (this is the window the aux ' +
+              'longpoll exists to close)'
+          );
+          return 'the Dogecoin tip moved before the proof was submitted';
+        }
         lastError = err;
         this.log(
           `submitauxblock attempt ${attempt + 1}/${delays.length} for height ${height} failed: ${err.message}`
@@ -1724,10 +2026,37 @@ class Pool extends EventEmitter {
       coinbaseValue: job ? (this.merged ? job.auxValue : job.coinbaseValue) : null,
       templateAgeMs: this.stats.lastTemplateAt ? Date.now() - this.stats.lastTemplateAt : null,
       templateError: this.stats.templateError,
+      // 'unreachable' (the node is not answering) or 'unusable' (it answered
+      // with something this pool cannot turn into a job). Both mean nothing is
+      // being mined; they send the operator to completely different places.
+      templateErrorKind: this.stats.templateErrorKind || null,
       auxError: this.stats.auxError || null,
+      // Timestamps, not just the human sentences above. The health monitor
+      // decides "how long has this been true" and must not have to parse a
+      // number back out of an English string — and a sentence that already
+      // contains a duration cannot be compared against a threshold at all.
+      templateFailedAt: this.stats.templateFailedAt || null,
+      auxUnavailableSince: this.auxUnavailableSince || null,
+      // Evidence for the aux longpoll, both directions: how often dogecoind
+      // told us its tip moved, and how many solved Dogecoin blocks were lost
+      // because we found out too late.
+      // What the aux chain falls back to when the longpoll is off or has given
+      // up, so the dashboard can say "polling every 2s" rather than leaving the
+      // user to guess what "not longpolling" means.
+      pollIntervalMs: this.config.pollIntervalMs,
+      auxLongpoll: !!(this.merged && this.config.auxLongpoll && !this.auxLongpollDisabled),
+      auxLongpollDisabled: this.auxLongpollDisabled || null,
+      auxLongpollSignals: this.auxLongpollSignals || 0,
+      auxTipMoves: this.auxTipMoves || 0,
+      auxTipMissed: this.stats.auxTipMissed || 0,
+      auxTipMissedAt: this.stats.auxTipMissedAt || null,
       accepted: this.stats.accepted,
       rejected: this.stats.rejected,
       rejectReasons: this.stats.rejectReasons,
+      // When these counters were last zeroed by hand. Null means they are the
+      // lifetime figures; a timestamp means the dashboard must say so, or the
+      // reject rate reads as "since forever" when it is not.
+      resetAt: this.stats.resetAt || (this.store ? this.store.state.resetAt : null) || null,
       // Consensus-space, so it is directly comparable with networkDifficulty.
       bestShareDiff: this.stats.bestShareDiff,
       // The same share expressed in the stratum units a miner reports, which

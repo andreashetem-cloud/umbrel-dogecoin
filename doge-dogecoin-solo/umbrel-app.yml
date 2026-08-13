@@ -1,8 +1,11 @@
 manifestVersion: 1
 id: doge-dogecoin-solo
 category: bitcoin
-name: Dogecoin + Litecoin Solo Mining
-version: "1.3.3"
+# Short enough not to be truncated on the umbrelOS home screen. "Dogecoin +
+# Litecoin Solo Mining" was shown as "Dogecoin + Litecoi…", which loses the one
+# word that says what the app is for.
+name: DOGE + LTC Solo
+version: "1.4.0"
 tagline: Solo mine Dogecoin, or merge-mine Dogecoin and Litecoin, on your own nodes
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -54,6 +57,53 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  This app can now tell you when it has stopped mining. After an umbrelOS restart both node
+  apps stayed down, this app kept answering its own healthcheck — which only ever checked its
+  own web server — and thirteen hours passed with nothing mined and nothing said. The
+  dashboard now shows a red bar naming the node that is unreachable and how long it has been,
+  any subscribed phone is notified once when it happens and once when it recovers, and the
+  container healthcheck actually fails. It works even when the pool never started at all,
+  which is exactly the case that went unnoticed: with the Dogecoin node down, merged mining
+  deliberately refuses to start, so anything watching from inside the pool would never have
+  run. A last resort restarts the process after a stall that no node is reporting an error
+  for — never during a real outage, where restarting cannot switch a node app back on, and
+  never while a block is being submitted.
+
+
+  Dogecoin's tip is now followed rather than polled. dogecoind has no longpoll for
+  createauxblock, but it has one for getblocktemplate, and the moment its tip moves is all
+  that is needed: AuxMiningCreateBlock clears its map of issued aux blocks on every tip
+  change, and submitauxblock then answers "block hash unknown". At a two second poll that
+  left about one second of every sixty second Dogecoin block being hashed against work that
+  could no longer be handed in. That window is now a round trip. A proof that arrives too
+  late is no longer retried for a hundred seconds against a certainty, and is counted so the
+  gain is measurable rather than asserted.
+
+
+  The share counters can be reset from the dashboard. A day of changing miner settings leaves
+  a reject rate that hides everything that happens afterwards. Blocks found are never
+  cleared, and neither is the cumulative work each miner has done — that is the denominator
+  of the luck figure, and zeroing it while keeping the block count would leave the dashboard
+  reading "1 block found, 8.0e+10% luck". The app is also renamed and its icon now carries
+  both coins, because "Dogecoin + Litecoin Solo Mining" was shown truncated on the umbrelOS
+  home screen and its icon was indistinguishable from the Dogecoin node app's.
+
+
+  Three independent reviews of the above found, and this release fixes: an aborted longpoll
+  leaving a worker thread parked inside dogecoind until its tip moves — measured on a real
+  node, where the fourth one made submitauxblock time out too, so the loop now backs off hard
+  and gives itself up rather than tie up a node that has eight threads; a node-down push
+  being rendered as a repeat of the last block notification for ten minutes after any block,
+  and then not repeated for six hours; every duration being measured on a wall clock that
+  steps by hours when NTP corrects an Umbrel after boot, which could both fire a false alarm
+  during a legitimately slow start and announce a recovery that never happened; a flapping
+  node buzzing a phone thirty times an hour; and a merged pool that answered its nodes
+  perfectly but could not turn their templates into a job — miners left on stale work behind
+  a green dashboard, indefinitely, because "a template arrived" was recorded before the job
+  was built. Each fix carries a test, and each test carries a mutant that proves it fails
+  when the fix is removed.
+
+
   Fixes found by an independent review of the 1.3.1 and 1.3.2 changes. A template answer that
   arrived out of order could put every miner back on an already-orphaned Litecoin block, silently,
   with the dashboard still green — the faster poll made that race more likely rather than less, so

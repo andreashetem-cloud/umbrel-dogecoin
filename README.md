@@ -268,11 +268,87 @@ once.
 
 ---
 
+## When the mining stops
+
+The solo app used to answer its healthcheck with "my own web server is up", which it always was. After
+an umbrelOS restart both node apps stayed down, the app stayed green, and thirteen hours passed with
+nothing mined and nothing said. Since 1.4.0 it watches for that.
+
+Three things happen at once when a node has been unreachable for `ALARM_AFTER_SECONDS` (180 by
+default):
+
+* a red bar at the top of the dashboard naming the node and how long it has been gone, and — because
+  the app cannot fix this itself — saying to check the node apps in umbrelOS;
+* one push notification to every subscribed phone, once when it starts and once when it recovers. Not
+  once per check: the alarm is keyed on WHICH problems exist, so a standing outage repeats only every
+  `ALARM_REPEAT_HOURS`;
+* `/health` returns 503, so the container's healthcheck reports unhealthy instead of passing.
+
+It also covers the case that caused the thirteen hours: the pool that never started at all. With the
+Dogecoin node down, merged mining deliberately refuses to start rather than quietly mining one chain,
+so anything watching from inside the pool would never have run. The monitor lives beside the pool, not
+in it, and works from "there is no pool" as readily as from a running one.
+
+`STALL_RESTART_MINUTES` (15) is the last resort, and it is deliberately narrow. It fires only for a
+stall that no node is reporting an error for — the wedge — and never while a block submission is in
+flight. It does **not** fire during a real node outage: restarting cannot switch a node app back on,
+and a process that exited every quarter of an hour would restart-loop and re-arm its own alarm all
+night. Note that this has to be an exit rather than a failing healthcheck: Docker restarts a container
+that **exits**, and health-based replacement exists only in Swarm.
+
+### Following Dogecoin's tip instead of polling it
+
+In merged mining the longpoll follows Litecoin, because the parent tip is what invalidates the header
+miners are hashing. Dogecoin's tip had no longpoll to follow — `createauxblock` does not offer one —
+so it was polled every two seconds.
+
+That gap was not free. Verified in Dogecoin Core 1.14.9 and then measured against the binary in
+`test/aux_longpoll_regtest.sh`: `AuxMiningCreateBlock` clears its map of issued aux blocks the moment
+`pindexPrev != chainActive.Tip()`, and `submitauxblock` then answers `block hash unknown`. So a
+Dogecoin block solved in the window between a new Dogecoin block and our next poll cannot be handed in
+at all — on average one second of every sixty second block, about 1.7% of the Dogecoin side.
+
+1.4.0 runs a second longpoll against dogecoind's `getblocktemplate`, purely as a "the tip has moved"
+signal, and fetches a fresh aux block the instant it returns. The poll stays as a backstop. A proof
+that does arrive too late is no longer retried for a hundred seconds against a certainty, and is
+counted, so the improvement is measurable rather than asserted.
+
+Set `AUX_LONGPOLL=0` in `.env` to go back to polling alone.
+
+The Litecoin panel on the dashboard shows both halves of whether it is working: how many
+Dogecoin tips the longpoll caught (a return caused by a mempool update is not counted — Dogecoin's
+longpoll has that second exit, and counting it would roughly double the figure), and how many solved
+Dogecoin blocks were lost because the tip had already moved. The second number is the one this is all
+for, and it should stay at zero.
+
+There is one hazard, and it is bounded rather than argued about. dogecoind's longpoll wait has no
+timeout and does not notice that a client has gone, so every abandoned longpoll parks one of the
+node's eight RPC worker threads until its tip moves. Measured on a real node with `rpcthreads=4`, the
+fourth abandoned longpoll made every other call — including `submitauxblock` — time out. Reaching
+that needs a Dogecoin tip *and* mempool that are both still for minutes, which is already a sick
+chain, but the consequence would be a found block that cannot be handed in. So the loop backs off for
+thirty seconds after a timeout and gives itself up entirely after three in a row, loudly, and the aux
+side falls back to the poll — correct, if slower.
+
+### Resetting the counters
+
+A reject rate only means something as a rate *since* something. A day of changing miner settings leaves
+tens of thousands of rejects on the record, after which a genuinely new problem moves the headline
+figure by a fraction of a percent and is invisible.
+
+The Statistics panel on the dashboard clears the share counters, the reject reasons and the best share
+ever, and the page then labels those figures "since reset". Blocks found are never cleared — the block
+records are the evidence a block was mined, `blocksFound` is derived from them, and startup
+reconciliation compares them against the node — and neither is how long the pool has been mining.
+
+---
+
 ## Testing
 
 ```bash
 ./test/entrypoint.sh     # 56 checks
 ./test/integration.sh    # 55 checks
+./test/mutants.sh        # 19 mutants, all of which must be caught
 ```
 
 `entrypoint.sh` is the one that matters most, because the entrypoint is where a mistake is both most
@@ -314,6 +390,23 @@ The suites also guard against themselves. Both count their checks and fail if on
 `assert_not_contains` fails rather than passes on an empty response, and each input-validation case
 asserts on the specific error message so that a crash for an unrelated reason cannot masquerade as a
 successful rejection.
+
+`test/mutants.sh` takes that further, because a passing suite proves nothing on its own — two tests in
+this repo were once vacuous, and that was found by breaking the code and watching them pass anyway. It
+copies the tree, plants one plausible bug in it (the notification signature built from texts rather
+than keys, the restart watchdog firing during a real outage, the aux longpoll never refreshing its
+longpollid, the reset clearing the hashrate window, the MWEB presence flag dropped), runs the suite
+that is supposed to catch it, and fails if that suite still passes. It also refuses to run a mutation
+whose target is no longer in the source, so a mutant that has drifted cannot report itself as caught.
+
+`test/aux_longpoll_regtest.sh` checks the claims that are about Dogecoin rather than about this code,
+against a real regtest dogecoind: that a `getblocktemplate` longpoll returns within milliseconds of a
+tip change, that a spent `longpollid` returns immediately (which is why the loop refreshes the id from
+every answer and throttles anyway), that `createauxblock` caches until the tip moves, and that
+`submitauxblock` then refuses the superseded aux block with the exact wording the pool fails fast on.
+It needs two nodes: Dogecoin Core 1.14.9's `getblocktemplate` refuses with "Dogecoin is not connected!"
+when the node has no peers and, unlike Bitcoin Core, does not exempt regtest — while `createauxblock`
+does exempt it.
 
 ---
 

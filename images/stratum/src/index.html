@@ -59,6 +59,18 @@ body.block-found .jackpot{display:block}
 .notice.show{display:block}
 .notice.bad{border-left-color:var(--bad);background:rgba(212,97,74,.08)}
 
+/* ---------- node alarm ----------
+   Louder than a notice on purpose. A notice is housekeeping: a slow template,
+   a worker that went quiet. This bar means nothing is being mined at all, and
+   it is the thing that was missing for thirteen hours. */
+.alarm{display:none;margin:16px 0 0;padding:13px 16px;border-radius:2px;
+  font:600 14px/1.5 var(--sans);border:1px solid var(--bad);
+  background:rgba(212,97,74,.14);color:var(--cream)}
+.alarm.show{display:block}
+.alarm.warn{border-color:var(--warn);background:rgba(217,158,43,.12)}
+.alarm .line + .line{margin-top:6px}
+.alarmsub{font:400 12px/1.6 var(--mono);color:var(--dim);margin-top:8px}
+
 /* ---------- hero ---------- */
 .hero{display:grid;grid-template-columns:1.35fr 1fr;gap:1px;background:var(--line-soft);
   border:1px solid var(--line-soft);margin-top:22px}
@@ -234,6 +246,7 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <p><button id="dismissAlarm">Dismiss</button></p>
   </section>
 
+  <div class="alarm" id="alarm"></div>
   <div class="notice" id="notice"></div>
 
   <section class="hero">
@@ -339,6 +352,17 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <p class="empty" id="pushHelp"></p>
   </div>
 
+  <h2>Statistics <span class="aside" id="resetAside"></span></h2>
+  <div class="push" id="resetBox">
+    <p id="resetState">Shares, reject reasons and the best share ever are counted since this app was first started.</p>
+    <div class="pushbtns">
+      <button type="button" id="resetOpen">Reset the counters</button>
+      <button type="button" id="resetGo" hidden>Yes, clear them</button>
+      <button type="button" id="resetCancel" hidden>Cancel</button>
+    </div>
+    <p class="empty" id="resetHelp">Clears the share counters, the reject reasons and the best share ever — useful after a session of changing miner settings, when an old reject rate hides whether anything is still going wrong. Blocks found are never cleared, and neither is how long this pool has been mining.</p>
+  </div>
+
   <h2>Connect a miner</h2>
   <div class="kv">
     <div class="r"><span class="k">Stratum URL</span><span class="v" id="cUrl">—</span><button data-copy="cUrl">Copy</button></div>
@@ -376,6 +400,11 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <div class="kv spaced">
       <div class="r"><span class="k">Chance of a Litecoin block in a year</span><span class="v" id="pOdds">—</span></div>
       <div class="r"><span class="k">Chance of a Dogecoin block in a year</span><span class="v" id="dOdds">—</span></div>
+      <!-- How the Dogecoin half is kept up to date, and what it has cost.
+           Without this the longpoll is a claim in a release note: a loop that
+           silently died looks exactly like a quiet chain. -->
+      <div class="r"><span class="k">Following the Dogecoin tip</span><span class="v" id="pAuxLp">—</span></div>
+      <div class="r"><span class="k">Blocks lost to a moved tip</span><span class="v" id="pAuxMissed">—</span></div>
     </div>
     <p class="empty" id="parentNote"></p>
   </section>
@@ -1193,6 +1222,36 @@ async function tick(){
   if(!hadStatus && history.shareLog && history.shareLog.length) renderCharts();
   const notice = $('notice');
 
+  // The alarm bar, drawn BEFORE the not-ok branch below returns. The single
+  // most important thing this page can say — "the pool never started, nothing
+  // has been mined for hours" — belongs to exactly that branch, and a bar
+  // rendered further down would never appear in it.
+  const alarm = $('alarm');
+  const alerts = Array.isArray(d.alerts) ? d.alerts : [];
+  if(alerts.length){
+    const bad = alerts.some((a) => a && a.level === 'down');
+    alarm.className = 'alarm show' + (bad ? '' : ' warn');
+    alarm.innerHTML =
+      alerts.map((a) => '<div class="line">' + esc(a && a.text ? a.text : '') + '</div>').join('') +
+      // The app cannot fix this itself, and the one action that helps is not
+      // obvious at three in the morning: the node apps live elsewhere in
+      // umbrelOS, and this app has no way to start them.
+      '<div class="alarmsub">Check that the Dogecoin' +
+      (d.mergedMining ? ' and Litecoin node apps are' : ' node app is') +
+      ' running in umbrelOS. Mining resumes on its own once they answer.</div>';
+  } else {
+    alarm.className = 'alarm';
+    alarm.textContent = '';
+  }
+
+  // Also before the early return. The reset endpoint works with no pool — which
+  // is exactly when someone is changing settings and wants a clean slate — so
+  // leaving this below would mean pressing the button while a node is down
+  // reports "cleared 25,338 rejected shares" one line under a paragraph still
+  // claiming the counters are lifetime figures.
+  $('resetAside').textContent = d.resetAt ? 'reset ' + since(d.resetAt) + ' ago' : '';
+  if($('resetGo').hidden) $('resetState').textContent = resetStateText();
+
   if(!d.ok){
     $('beacon').className = 'beacon off';
     $('mastMeta').textContent = 'not mining';
@@ -1234,9 +1293,23 @@ async function tick(){
     if(still) showBanner(still);
   }
 
-  if(d.templateError){
+  // Everything below is the quieter channel. When the alarm bar is up it is
+  // already saying this, with a duration and in stronger words, so repeating it
+  // one line lower would only make the page look like it has two problems.
+  if(alerts.length){
+    notice.className = 'notice';
+  } else if(d.templateError){
     notice.className = 'notice show bad';
-    notice.textContent = 'Cannot reach the Dogecoin node: ' + d.templateError;
+    // The chain whose node hands out the work. In merged mode that is
+    // Litecoin, and sending someone to the Dogecoin app for a Litecoin outage
+    // is the kind of small lie that costs an hour at night. The same applies to
+    // a node that IS answering but whose templates cannot be used: telling
+    // someone it is unreachable would have them restarting the wrong thing.
+    notice.textContent = d.templateErrorKind === 'unusable'
+      ? 'The ' + (d.mergedMining ? 'Litecoin' : 'Dogecoin') +
+        ' node is answering, but its block templates cannot be turned into work: ' + d.templateError
+      : 'Cannot reach the ' + (d.mergedMining ? 'Litecoin' : 'Dogecoin') +
+        ' node: ' + d.templateError;
   } else if(d.auxError){
     // Merged mining with one chain down. Everything else on this page looks
     // healthy — hashrate, workers, template age — and only the Dogecoin height
@@ -1291,9 +1364,13 @@ async function tick(){
   const fraction = d.networkDifficulty > 0 ? best/d.networkDifficulty : 0;
   $('best').textContent = compact(best);
   $('bestPct').textContent = fraction > 0 ? (fraction >= 1 ? 'BLOCK' : 'of ' + compact(d.networkDifficulty)) : '';
+  // The best share is cleared by a reset too, so the same honesty applies here
+  // as on the shares tile: right after one this reads "no shares yet" on a pool
+  // that has been mining for months, and that has to be explained rather than
+  // left to look like a fault.
   $('bestSub').textContent = best
     ? percent(fraction) + ' of a block' + (d.bestShareAt ? ' · ' + since(d.bestShareAt) + ' ago' : '')
-    : 'no shares yet';
+    : d.resetAt ? 'none since the counters were reset' : 'no shares yet';
 
   // ruler
   const pos = rulerPos(fraction);
@@ -1325,9 +1402,15 @@ async function tick(){
     : rejectRate >= 1 ? rejectRate.toFixed(1) + '%'
     : rejectRate >= 0.01 ? rejectRate.toFixed(2) + '%'
     : '<0.01%';
-  $('fSharesSub').textContent = d.rejected
+  // After a reset this figure is not a lifetime total, and a reject rate is
+  // only meaningful as a rate SINCE something. Saying which is the difference
+  // between "0.4% rejected" meaning the pool is healthy and it meaning the
+  // counter was cleared five minutes ago.
+  const countedSince = d.resetAt ? ' · since reset' : '';
+  $('fSharesSub').textContent = (d.rejected
     ? d.rejected + ' rejected (' + rateText + ')'
-    : 'none rejected';
+    : 'none rejected') + countedSince;
+
 
   $('fBlocks').textContent = d.blocksFound;
   $('fBlocks').className = 'v' + (d.blocksFound ? ' gold' : '');
@@ -1380,8 +1463,13 @@ async function tick(){
     // which is the right behaviour — but a badge still reading DOGE + LTC
     // would be the page's most prominent statement and the one thing on it
     // that is false. It says what is actually being mined right now.
-    mmb.textContent = d.auxError ? 'merged · LTC only' : 'merged · DOGE + LTC';
-    mmb.className = d.auxError ? 'mmb degraded' : 'mmb';
+    // Three states, not two. "LTC only" was honest when the Dogecoin node was
+    // the one missing, but it was still claiming a chain was being mined when
+    // the LITECOIN node was gone and nothing was being hashed at all.
+    mmb.textContent = d.templateError ? 'merged · stalled'
+      : d.auxError ? 'merged · LTC only'
+      : 'merged · DOGE + LTC';
+    mmb.className = (d.templateError || d.auxError) ? 'mmb degraded' : 'mmb';
   }
   if(d.mergedMining && d.merged){
     $('parentBox').hidden = false;
@@ -1398,6 +1486,23 @@ async function tick(){
     $('pReward').textContent = d.merged.parentReward != null
       ? (d.merged.parentReward/1e8).toLocaleString('en-US',{maximumFractionDigits:4}) + ' LTC' : '—';
     $('pAddress').textContent = d.merged.parentPayoutAddress || '—';
+
+    // The aux longpoll, in the two numbers that say whether it is working.
+    // `auxTipMoves` counts Dogecoin tips it caught — a longpoll that returns
+    // because the mempool moved is not a tip movement and is not counted here.
+    $('pAuxLp').textContent = d.auxLongpollDisabled
+      ? 'stopped — ' + d.auxLongpollDisabled
+      : d.auxLongpoll
+        ? 'longpoll · ' + (d.auxTipMoves || 0) + ' tip' + ((d.auxTipMoves === 1) ? '' : 's') + ' caught'
+        : 'polling every ' + Math.round((d.pollIntervalMs || 2000)/1000) + 's';
+    $('pAuxLp').className = 'v' + (d.auxLongpollDisabled ? ' warnc' : '');
+    // Dogecoin blocks that were solved but could not be handed in, because
+    // dogecoind had already discarded the aux block. This is the number the
+    // longpoll exists to keep at zero.
+    $('pAuxMissed').textContent = d.auxTipMissed
+      ? d.auxTipMissed + (d.auxTipMissedAt ? ' · last ' + since(d.auxTipMissedAt) + ' ago' : '')
+      : 'none';
+    $('pAuxMissed').className = 'v' + (d.auxTipMissed ? ' badc' : '');
 
     const year = 365*24*3600;
     $('pOdds').textContent = pNet > 0
@@ -1581,6 +1686,59 @@ async function refreshHistory(){
 }
 
 buildRuler();
+/* ---------- resetting the counters ----------
+   Two clicks, deliberately. This throws away numbers that cannot be
+   reconstructed, and it sits one section below a button that sends a test
+   notification — a misfire there costs nothing, a misfire here costs the
+   record. The confirm is the whole safety mechanism, so it is a real second
+   button rather than a window.confirm() that some browsers suppress. */
+function showResetConfirm(on){
+  $('resetOpen').hidden = on;
+  $('resetGo').hidden = !on;
+  $('resetCancel').hidden = !on;
+  $('resetState').textContent = on
+    ? 'This clears the share counters, the reject reasons and the best share ever. It cannot be undone. Blocks found are kept.'
+    : resetStateText();
+}
+
+function resetStateText(){
+  const at = lastStatus && lastStatus.resetAt;
+  return at
+    ? 'Counting since ' + new Date(at).toLocaleString() + '. Blocks found and the time this pool has been mining are unaffected.'
+    : 'Shares, reject reasons and the best share ever are counted since this app was first started.';
+}
+
+$('resetOpen').addEventListener('click', () => showResetConfirm(true));
+$('resetCancel').addEventListener('click', () => showResetConfirm(false));
+$('resetGo').addEventListener('click', async () => {
+  $('resetGo').disabled = true;
+  try{
+    const res = await fetch('/api/reset', {
+      method: 'POST',
+      // Both headers matter: the JSON content type is what stops this from
+      // being a CORS "simple request" that any other site could send.
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({counters: true, best: true}),
+    });
+    const out = await res.json();
+    if(!out.ok) throw new Error(out.error || ('HTTP ' + res.status));
+    showResetConfirm(false);
+    $('resetHelp').textContent = 'Cleared ' + out.before.accepted.toLocaleString() +
+      ' accepted and ' + out.before.rejected.toLocaleString() + ' rejected shares.' +
+      // A reset that could not be written will come back on the next restart.
+      // Saying so now is the difference between a surprise and a known limit.
+      (out.persisted === false ? ' The data directory is not writable, so this will return after a restart.' : '');
+    // Straight away, not on the next poll: the point of pressing this is to
+    // watch the number go to zero.
+    tick();
+    refreshHistory();
+  }catch(err){
+    $('resetHelp').textContent = 'Could not reset: ' + err.message;
+  }finally{
+    $('resetGo').disabled = false;
+  }
+});
+
 tick();
 refreshHistory();
 refreshPushUI();

@@ -14,7 +14,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.3.3
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.4.0
     restart: on-failure
     logging: *default-logging
     # Docker's default is 10 seconds, and the shutdown handler waits up to 130
@@ -239,6 +239,66 @@ services:
       # Anything left out keeps the default after the :- below, which is the
       # Dogecoin-only behaviour.
       # ---------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # WATCHING THE NODES (1.4.0)
+      #
+      # The app used to answer its healthcheck with "my own web server is up",
+      # which it always was. After an umbrelOS restart both node apps stayed
+      # down, this app stayed green, and thirteen hours passed with nothing
+      # mined and nothing said. It now watches for that: the dashboard turns
+      # red, any subscribed phone is notified, and the healthcheck actually
+      # fails.
+      #
+      # Set these in .env, like everything else here. The defaults are right
+      # for a home node.
+      #
+      #   ALARM_AFTER_SECONDS     how long a node must be unreachable, or no
+      #                           template must arrive, before that is an alarm.
+      #                           Floored at 10; below that a single slow
+      #                           template is an "outage".
+      #   STARTUP_GRACE_SECONDS   how long the pool may fail to start before
+      #                           that is an alarm. Longer on purpose: umbrelOS
+      #                           starts every app at once and a node loading
+      #                           its block index off an SD card is legitimately
+      #                           unreachable for minutes.
+      #   ALARM_REPEAT_HOURS      how rarely a STANDING alarm is repeated, so a
+      #                           phone in a drawer still learns about a
+      #                           week-long outage without buzzing all week.
+      #   STALL_RESTART_MINUTES   last resort: exit so this container's
+      #                           `restart: on-failure` gives a clean process.
+      #                           Only for a wedge — no template arriving while
+      #                           the nodes report no error at all — and never
+      #                           while a block is being submitted. It does NOT
+      #                           fire during a real node outage: restarting
+      #                           cannot switch a node app back on, and a
+      #                           process that exited every quarter hour would
+      #                           restart-loop and re-arm its own alarm all
+      #                           night. 0 switches it off.
+      #
+      # Worth knowing: Docker restarts a container that EXITS. A failing
+      # healthcheck on its own restarts nothing outside Swarm, which is why
+      # that setting exists at all rather than being left to Docker.
+      ALARM_AFTER_SECONDS: "${ALARM_AFTER_SECONDS:-180}"
+      STARTUP_GRACE_SECONDS: "${STARTUP_GRACE_SECONDS:-300}"
+      ALARM_REPEAT_HOURS: "${ALARM_REPEAT_HOURS:-6}"
+      STALL_RESTART_MINUTES: "${STALL_RESTART_MINUTES:-15}"
+
+      # Follow dogecoind's tip by longpoll instead of only polling it (1.4.0).
+      #
+      # dogecoind has no longpoll for createauxblock — that is why the aux side
+      # was polled — but it does have one for getblocktemplate, and what this
+      # needs is not the template, it is the moment the tip moves. Verified in
+      # Dogecoin Core 1.14.9: AuxMiningCreateBlock clears mapNewBlock whenever
+      # the tip changes, and submitauxblock then answers "block hash unknown",
+      # so every aux block issued for the old tip becomes worthless at exactly
+      # that instant. At a 2 second poll that was on average one second of every
+      # 60 second Dogecoin block spent hashing work that could no longer be
+      # handed in — the ~1.7% this closes. Merged mode only; in Dogecoin-only
+      # mode the main longpoll already follows dogecoind.
+      #
+      # Set AUX_LONGPOLL=0 in .env to go back to polling alone.
+      AUX_LONGPOLL: "${AUX_LONGPOLL:-1}"
+
       MERGED_MINING: "${MERGED_MINING:-0}"
       LTC_RPC_HOST: "${LTC_RPC_HOST:-doge-litecoin-node_litecoind_1}"
       LTC_RPC_PORT: "${LTC_RPC_PORT:-9332}"

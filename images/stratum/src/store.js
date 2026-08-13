@@ -83,6 +83,10 @@ function emptyState() {
     // workers the few kilobytes cost nothing, and an index that drifts out of
     // step with its table silently mislabels every share in the chart.
     shareLog: [],
+    // When the counters were last zeroed by hand, so the dashboard can say
+    // "since 13 Aug 14:02" rather than implying these are lifetime figures.
+    // Optional: a file written before this existed simply has null.
+    resetAt: null,
     // When the incoming clock first disagreed with the stored history, so the
     // decision to re-anchor survives a restart.
     disagreeingSince: null,
@@ -221,6 +225,7 @@ class Store {
     s.rejected = Math.max(0, Math.floor(num(parsed.rejected)));
     s.bestShareDiff = Math.max(0, num(parsed.bestShareDiff));
     s.bestShareAt = num(parsed.bestShareAt, null) || null;
+    s.resetAt = num(parsed.resetAt, null) || null;
     // Clamped like every other stored number. A negative value would make the
     // elapsed time enormous and re-anchor — deleting history — on the very
     // first out-of-order sample, skipping the waiting period entirely.
@@ -292,6 +297,86 @@ class Store {
 
   markDirty() {
     this.dirty = true;
+  }
+
+  // Zero the counters, on request, from the dashboard.
+  //
+  // Why this exists: a reject rate is only useful as a rate SINCE something.
+  // A day of experimenting with miner settings leaves tens of thousands of
+  // rejects on the record, and after that a fresh problem — a board going bad,
+  // a stratum change that starts producing stale work — moves the headline
+  // figure by a fraction of a percent and is invisible. The number stops
+  // answering the only question anyone asks it: is it happening NOW.
+  //
+  // What is deliberately NOT resettable here:
+  //
+  //   * The block records. They are the record of money, they are what
+  //     reconciliation compares against the node at every startup, and
+  //     blocksFound() is derived from them rather than stored — so "resetting"
+  //     them would not zero a counter, it would delete the evidence that a
+  //     block was ever mined. Nothing in this app deletes those.
+  //   * firstStartedAt. "Mining for 8 months" is a fact about the machine, not
+  //     a statistic about shares.
+  //   * Each worker's `work`, the lifetime sum of credited difficulty. It is
+  //     not a share counter: it is the denominator of the "work done" figure
+  //     and of the luck percentage, and it is the natural partner of the block
+  //     count that is deliberately kept. Zeroing it while keeping blocksFound
+  //     leaves `1 block found, 8.0e+10% luck` on the dashboard — a number that
+  //     is not merely reset but wrong, and unrecoverable without mining for as
+  //     long again.
+  //
+  // `scope` picks what goes: {counters, best, history}. The timestamp is
+  // recorded so every figure derived from these can be labelled honestly
+  // afterwards.
+  reset(scope = {}) {
+    const s = this.state;
+    const before = {
+      accepted: s.accepted,
+      rejected: s.rejected,
+      bestShareDiff: s.bestShareDiff,
+    };
+    const cleared = [];
+
+    if (scope.counters) {
+      s.accepted = 0;
+      s.rejected = 0;
+      s.rejectReasons = {};
+      for (const w of Object.values(s.workers)) {
+        w.accepted = 0;
+        w.rejected = 0;
+        w.rejectReasons = {};
+      }
+      cleared.push('counters');
+    }
+    if (scope.best) {
+      s.bestShareDiff = 0;
+      s.bestShareAt = null;
+      for (const w of Object.values(s.workers)) {
+        w.bestShareDiff = 0;
+        w.bestShareAt = null;
+      }
+      cleared.push('best share');
+    }
+    if (scope.history) {
+      s.minuteSamples = [];
+      s.hourSamples = [];
+      s.shareLog = [];
+      for (const w of Object.values(s.workers)) w.samples = [];
+      cleared.push('charts');
+    }
+
+    if (!cleared.length) return { ok: false, error: 'nothing selected', before };
+    s.resetAt = Date.now();
+    this.dirty = true;
+    // Written through immediately. The only other save is a five-minute timer,
+    // and a reset that a reboot silently undoes is worse than no reset at all:
+    // the user would go on reading a number they believe starts from zero.
+    const saved = this.save(true);
+    this.log(
+      `statistics reset (${cleared.join(', ')}): ${before.accepted} accepted and ` +
+        `${before.rejected} rejected shares cleared; block records kept`
+    );
+    return { ok: true, cleared, before, persisted: saved };
   }
 
   save(force = false) {
