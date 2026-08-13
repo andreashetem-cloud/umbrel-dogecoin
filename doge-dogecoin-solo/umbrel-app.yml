@@ -2,7 +2,7 @@ manifestVersion: 1
 id: doge-dogecoin-solo
 category: bitcoin
 name: Dogecoin + Litecoin Solo Mining
-version: "1.3.1"
+version: "1.3.2"
 tagline: Solo mine Dogecoin, or merge-mine Dogecoin and Litecoin, on your own nodes
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -54,6 +54,15 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  The Dogecoin side of merged mining now refreshes every 2 seconds instead of every 5.
+  Merged mining longpolls Litecoin, because the parent tip is what invalidates the header
+  miners are hashing, and dogecoind offers no longpoll on createauxblock — so the Dogecoin
+  tip is caught by polling alone, and the gap between a new Dogecoin block and the next
+  poll is time spent on an aux block that would be rejected if found. At 60 second blocks
+  that was about 4% of the Dogecoin half; it is now under 2%. Settable as
+  POLL_INTERVAL_SECONDS in .env.
+
+
   Settings now survive an app update. Everything device-specific — the payout addresses,
   the merged-mining switch, the Litecoin RPC password, the mining profile — is read from
   .env in the app's data directory instead of from docker-compose.yml, which umbrelOS

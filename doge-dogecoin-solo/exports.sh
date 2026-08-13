@@ -69,7 +69,7 @@ if [ -n "${_solo_env_file}" ]; then
       \'*\') _value="${_value#\'}"; _value="${_value%\'}" ;;
     esac
     case "${_key}" in
-      PAYOUT_ADDRESS|MINING_PROFILE|MERGED_MINING|LTC_RPC_HOST|LTC_RPC_PORT|LTC_RPC_USER|LTC_RPC_PASSWORD|LTC_PAYOUT_ADDRESS)
+      PAYOUT_ADDRESS|MINING_PROFILE|MERGED_MINING|POLL_INTERVAL_SECONDS|LTC_RPC_HOST|LTC_RPC_PORT|LTC_RPC_USER|LTC_RPC_PASSWORD|LTC_PAYOUT_ADDRESS)
         export "${_key}=${_value}"
         ;;
       *) : ;;

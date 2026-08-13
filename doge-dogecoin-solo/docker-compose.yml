@@ -90,9 +90,20 @@ services:
       VARDIFF_WINDOW: "10"
 
       # --- timing --------------------------------------------------------
-      # New blocks arrive via getblocktemplate longpoll within milliseconds;
-      # this poll is only a safety net if longpoll is interrupted.
-      POLL_INTERVAL_SECONDS: "5"
+      # Dogecoin-only: new blocks arrive via getblocktemplate longpoll within
+      # milliseconds and this poll is only a safety net if longpoll drops.
+      #
+      # MERGED mining is the reason the default is 2 rather than 5. There the
+      # longpoll follows LITECOIN — the parent tip is what invalidates the
+      # header miners are hashing — and Dogecoin's tip has no longpoll to
+      # follow: createauxblock is the only aux RPC dogecoind offers and it does
+      # not have one. So the aux side is caught by this poll alone, and every
+      # second between a new Dogecoin block and the next poll is a second spent
+      # hashing an aux block that would be rejected if it were found. At 60
+      # second Dogecoin blocks a 5 second poll wastes about 4% of the Dogecoin
+      # half; 2 seconds brings that under 2%. The cost is 2.5x as many
+      # createauxblock calls, which is a few milliseconds of node CPU each.
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-2}"
       JOB_REBUILD_SECONDS: "30"
       HASHRATE_WINDOW_SECONDS: "600"
 

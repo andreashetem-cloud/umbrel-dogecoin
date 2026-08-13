@@ -61,6 +61,10 @@ LTC_PAYOUT_ADDRESS=L123
 MINING_PROFILE=home
 ' MINING_PROFILE)"
 
+check "the aux poll interval is settable" "2" \
+  "$(run_with_env 'POLL_INTERVAL_SECONDS=2
+' POLL_INTERVAL_SECONDS)"
+
 check "a password containing = and / survives intact" \
   'a=b/c+d==' \
   "$(run_with_env 'LTC_RPC_PASSWORD=a=b/c+d==
