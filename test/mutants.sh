@@ -265,11 +265,14 @@ mutant "http: the status endpoint stops carrying the alarms" \
 
 mutant "http: the reset endpoint drops its cross-site guard" \
   "images/stratum/src/server.js" \
-  "  if (!sameOriginPost(req)) {
-    return reply(403, { ok: false, error: 'cross-site request refused' });
-  }
-  const body = await readJsonBody(req);" \
-  "  const body = await readJsonBody(req);" \
+  "function refuseCrossSite(req, reply) {
+  if (sameOriginPost(req)) return false;
+  reply(403, { ok: false, error: 'cross-site request refused' });
+  return true;
+}" \
+  "function refuseCrossSite(req, reply) {
+  return false;
+}" \
   "test/health_http.js"
 
 # --------------------------------------------------------- previously fixed bugs

@@ -512,6 +512,18 @@ function sameOriginPost(req) {
   return type === 'application/json';
 }
 
+// The one place every same-origin-only POST endpoint below turns a failed
+// sameOriginPost() check into an actual 403. Pulled out once these guards
+// started reading byte-for-byte identical at three call sites — which is
+// exactly the condition under which a copy-pasted check quietly drifts out of
+// sync at the fourth. Returns true if the request was refused (the caller's
+// handler should return immediately in that case), false if it may proceed.
+function refuseCrossSite(req, reply) {
+  if (sameOriginPost(req)) return false;
+  reply(403, { ok: false, error: 'cross-site request refused' });
+  return true;
+}
+
 // Zero the share counters on request. Same guard as the notification
 // endpoints, and for a sharper reason: this one DESTROYS data. Umbrel's proxy
 // authenticates with a cookie the browser attaches to cross-site requests too,
@@ -522,9 +534,7 @@ async function handleResetPost(req, res) {
     res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(body));
   };
-  if (!sameOriginPost(req)) {
-    return reply(403, { ok: false, error: 'cross-site request refused' });
-  }
+  if (refuseCrossSite(req, reply)) return;
   const body = await readJsonBody(req);
   if (!body) return reply(400, { ok: false, error: 'expected a small JSON object' });
 
@@ -570,9 +580,7 @@ async function handleSettingsPost(req, res) {
     res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(body));
   };
-  if (!sameOriginPost(req)) {
-    return reply(403, { ok: false, error: 'cross-site request refused' });
-  }
+  if (refuseCrossSite(req, reply)) return;
   const body = await readJsonBody(req);
   if (!body || typeof body.profile !== 'string') {
     return reply(400, { ok: false, error: 'expected { "profile": "home" | "rented" }' });
@@ -586,11 +594,9 @@ async function handlePushPost(req, res, pathname) {
     res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(body));
   };
-  if (!sameOriginPost(req)) {
-    // Drain nothing and answer immediately; there is no reason to read a body
-    // we have already decided not to act on.
-    return reply(403, { ok: false, error: 'cross-site request refused' });
-  }
+  // Drain nothing and answer immediately if refused; there is no reason to
+  // read a body we have already decided not to act on.
+  if (refuseCrossSite(req, reply)) return;
   if (!push.enabled) return reply(503, { ok: false, error: 'notifications are unavailable' });
 
   const body = await readJsonBody(req);
