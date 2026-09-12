@@ -1611,7 +1611,7 @@ async function tick(){
     $('rentedConnectNote').hidden = false;
     $('cUrlRented').textContent = 'stratum+tcp://' + location.hostname + ':' + d.rentedStratumPort;
     $('rentedConnectNote').textContent = d.rentedPortActive
-      ? 'Point a rented order at this port instead of the one above. It always runs the rented profile’s numbers, whatever the Mining profile section is currently set to — switching that control never touches this port.'
+      ? 'Point a rented order at this port instead of the one above. It always runs the rented profile\'s numbers, whatever the Mining profile section is currently set to — switching that control never touches this port.'
       : 'Configured but not currently listening. Check the container log — a clash with another port, or a bind failure, falls back to the primary port only.';
   } else {
     $('rentedConnectBox').hidden = true;
@@ -1749,10 +1749,14 @@ async function refreshProfileUI(){
     $('profileHelp').textContent = d.canRent
       ? '"home" is for your own miners on this network. "rented" is for hashpower bought from a ' +
         'NiceHash-style order — switch to it only while that order is running, and back once it ends.' +
-        (d.rentedStratumPort ? '' :
-          ' Switching this affects every worker on the main port at once. To run your own miners ' +
-          'and a rented order at the same time instead, set RENTED_STRATUM_PORT in .env — a second, ' +
-          'dedicated port that leaves this one alone.')
+        (d.rentedStratumPort
+          ? ' A dedicated rented-capacity port is also configured, on ' + d.rentedStratumPort + ' — see ' +
+            '"Connect a miner" below. That port always runs the rented profile\'s numbers on its own, so ' +
+            'switching this control never touches it, and your own miners on the main port never need to ' +
+            'move for a rented order again.'
+          : ' Switching this affects every worker on the main port at once. To run your own miners ' +
+            'and a rented order at the same time instead, set RENTED_STRATUM_PORT in .env — a second, ' +
+            'dedicated port that leaves this one alone.')
       : 'Switching to "rented" is disabled until LOCK_PAYOUT_ADDRESS=1 is set in .env: that profile ' +
         'assumes the stratum port is open to the internet, and an unlocked payout on an open port ' +
         'pays whoever asks.';
