@@ -38,6 +38,15 @@
 //      rented does.
 //   6. a port clash (RENTED_STRATUM_PORT equal to STRATUM_PORT or PORT) is
 //      refused at config time rather than fought over at bind time.
+//   7. merged mining and the rented port at once: both features stay
+//      configured together, and the SAME merged job reaches a worker on
+//      either port — not two independently-built jobs that happen to match.
+//   8. both ports' connection ceilings hold independently while BOTH are
+//      simultaneously saturated, and freeing one port's slot never frees
+//      the other's — proof the two counters are actually separate state.
+//   9. a suggest_difficulty above the ceiling clamps down to each port's OWN
+//      maximum — the high-side counterpart to the low-side clamp already
+//      covered by the live-switch case.
 //
 //   node test/dual_port.js [base-port]
 //
@@ -146,6 +155,7 @@ function stratumClient(port) {
       resolved = true;
       resolve({
         socket,
+        messages,
         difficulty: () => firstDifficulty,
         nextMessage: () => new Promise((res) => waiters.push(res)),
         suggestDifficulty: (d) => socket.write(JSON.stringify({ id: 99, method: 'mining.suggest_difficulty', params: [d] }) + '\n'),
@@ -153,6 +163,17 @@ function stratumClient(port) {
       });
     });
   });
+}
+
+// Waits for a mining.notify to show up in a client's message log — used where
+// the difficulty alone (what the client already resolves on) is not what's
+// being checked, such as proving two clients on different ports were handed
+// the same job.
+async function waitForNotify(client, ms = 8000) {
+  return until(() => {
+    const n = client.messages.find((m) => m.method === 'mining.notify');
+    return n ? n.params : null;
+  }, ms);
 }
 
 (async () => {
@@ -364,6 +385,172 @@ function stratumClient(port) {
     rented6.difficulty() === 65536, String(rented6.difficulty()));
   rented6.close();
   kill(s6.child);
+
+  // --- merged mining and the rented port at the same time -----------------
+  //
+  // Merged mining picks which chain's block templates get turned into jobs;
+  // the rented port picks which socket a worker is on. Nothing in either
+  // feature should know the other exists, and this is the case that would
+  // catch it if they did — e.g. a merged job only ever reaching the port that
+  // happened to be "primary" at the time it was built.
+  console.log('\nmerged mining and the rented port coexist, and both ports see the same merged job');
+  const port7 = BASE_PORT + 70;
+  const rentedPort7 = port7 + 2;
+  const base7 = `http://127.0.0.1:${port7}`;
+  const dir7 = path.join(dir, 'case7');
+  fs.mkdirSync(dir7, { recursive: true });
+
+  // A dedicated pair, separate from the shared `doge` used by every other
+  // case above: merged mode needs createauxblock/submitauxblock served, which
+  // the shared mock (aux: false) deliberately does not answer.
+  const dogeAux = new MockNode({ chain: 'main', aux: true });
+  const ltc = new MockNode({ chain: 'main' });
+  await dogeAux.listen();
+  await ltc.listen();
+
+  const s7 = startServer(port7, {
+    LOCK_PAYOUT_ADDRESS: '1',
+    RENTED_STRATUM_PORT: String(rentedPort7),
+    RPC_PORT: String(dogeAux.port),
+    MERGED_MINING: '1',
+    LTC_RPC_HOST: '127.0.0.1',
+    LTC_RPC_PORT: String(ltc.port),
+    LTC_RPC_PASSWORD: 'test',
+    // Already validated elsewhere in this repo's test suite (pool_wiring.js) —
+    // a real Litecoin mainnet address, distinct from the Dogecoin one above so
+    // a mix-up between the two would fail loudly rather than by coincidence.
+    LTC_PAYOUT_ADDRESS: 'LdAEjWgrrUjyV6Cy3DTKZ3uBNmG3FQhXsj',
+  }, dir7);
+  check('it comes up with both features configured', !!(await waitUp(base7)), s7.log.slice(-800));
+
+  const status7 = await until(async () => {
+    const r = await (await fetch(`${base7}/api/status`, { cache: 'no-store' })).json();
+    return r.mergedMining && r.rentedPortActive ? r : null;
+  }, 8000);
+  check('and reports merged mining on and the rented port active, together',
+    !!status7, 'never reported both at once');
+
+  const merged1 = await stratumClient(port7 + 1);
+  check('a primary-port worker still gets the home starting difficulty',
+    merged1.difficulty() === 2048, String(merged1.difficulty()));
+  const mergedNotify1 = await waitForNotify(merged1);
+  check('and is handed a job', !!mergedNotify1, 'no mining.notify received');
+
+  const merged2 = await stratumClient(rentedPort7);
+  check('a rented-port worker still gets the rented starting difficulty',
+    merged2.difficulty() === 1048576, String(merged2.difficulty()));
+  const mergedNotify2 = await waitForNotify(merged2);
+  check('and is handed a job too', !!mergedNotify2, 'no mining.notify received');
+
+  // params[0] is the stratum job id — the same merged job going out to both
+  // ports at once means both workers were handed the identical id, not two
+  // independently-built ones that happen to look similar.
+  check('both ports were handed the SAME merged job, not two different ones',
+    !!mergedNotify1 && !!mergedNotify2 && mergedNotify1[0] === mergedNotify2[0],
+    JSON.stringify({ primary: mergedNotify1 && mergedNotify1[0], rented: mergedNotify2 && mergedNotify2[0] }));
+
+  merged1.close();
+  merged2.close();
+  kill(s7.child);
+  await dogeAux.close().catch(() => {});
+  await ltc.close().catch(() => {});
+
+  // --- both ports' connection ceilings, saturated AT THE SAME TIME --------
+  //
+  // The earlier per-port-cap case (above) fills the rented port and checks
+  // the primary port's own first connection is unaffected — but never has
+  // BOTH ports full at once, and never proves the primary port's OWN second
+  // connection is independently refused while the rented port sits at its
+  // separate limit rather than sharing a single pool-wide counter.
+  console.log('\nboth ports\' connection ceilings hold independently while BOTH are simultaneously full');
+  const port8 = BASE_PORT + 80;
+  const stratumPort8 = port8 + 1;
+  const rentedPort8 = port8 + 2;
+  const base8 = `http://127.0.0.1:${port8}`;
+  const dir8 = path.join(dir, 'case8');
+  fs.mkdirSync(dir8, { recursive: true });
+  // MAX_CONNECTIONS is an explicit override and applies to both ports at
+  // once (documented, exercised deliberately here) — a cap of 1 each keeps
+  // this case fast.
+  const s8 = startServer(port8, {
+    LOCK_PAYOUT_ADDRESS: '1',
+    RENTED_STRATUM_PORT: String(rentedPort8),
+    MAX_CONNECTIONS: '1',
+  }, dir8);
+  check('it comes up', !!(await waitUp(base8)), s8.log.slice(-600));
+
+  const primaryA = await stratumClient(stratumPort8);
+  const rentedA = await stratumClient(rentedPort8);
+  check('both ports accept their first connection', primaryA.difficulty() !== null && rentedA.difficulty() !== null,
+    JSON.stringify({ primary: primaryA.difficulty(), rented: rentedA.difficulty() }));
+
+  // Now BOTH are simultaneously at their cap of 1. A second attempt on
+  // EITHER must be refused — not just the one this file already checked in
+  // isolation.
+  const primaryB = await stratumClient(stratumPort8).catch((err) => ({ refused: err }));
+  const primaryBRefused = primaryB.refused || primaryB.difficulty() === null;
+  check('a second primary connection is refused while both ports are full',
+    primaryBRefused, JSON.stringify(primaryB.difficulty ? primaryB.difficulty() : primaryB));
+
+  const rentedB = await stratumClient(rentedPort8).catch((err) => ({ refused: err }));
+  const rentedBRefused = rentedB.refused || rentedB.difficulty() === null;
+  check('a second rented connection is refused at the same time',
+    rentedBRefused, JSON.stringify(rentedB.difficulty ? rentedB.difficulty() : rentedB));
+
+  // Freeing the PRIMARY port's slot must not free the RENTED port's — proof
+  // the two counters are actually separate state, not one shared counter
+  // that happened to read the same number twice above.
+  primaryA.close();
+  await sleep(300); // let the server notice the disconnect
+  const primaryC = await stratumClient(stratumPort8);
+  check('closing the primary connection frees ONLY the primary slot',
+    primaryC.difficulty() !== null, 'the freed primary slot was not reusable');
+
+  const rentedC = await stratumClient(rentedPort8).catch((err) => ({ refused: err }));
+  const rentedCRefused = rentedC.refused || rentedC.difficulty() === null;
+  check('the rented port is still full — the primary port freeing up did not touch it',
+    rentedCRefused, JSON.stringify(rentedC.difficulty ? rentedC.difficulty() : rentedC));
+
+  if (rentedA.close) rentedA.close();
+  if (primaryB.socket) primaryB.socket.destroy();
+  if (rentedB.socket) rentedB.socket.destroy();
+  primaryC.close();
+  if (rentedC.socket) rentedC.socket.destroy();
+  kill(s8.child);
+
+  // --- suggest_difficulty ABOVE the ceiling clamps down, per port ---------
+  //
+  // The live-switch case above proves the LOW side of the clamp (suggesting
+  // 1, below the floor). Nothing yet proved the HIGH side, or that the two
+  // ports clamp to their OWN, different ceilings rather than one shared
+  // number.
+  console.log('\na suggest_difficulty above the ceiling clamps down to each port\'s OWN maximum');
+  const port9 = BASE_PORT + 90;
+  const rentedPort9 = port9 + 2;
+  const base9 = `http://127.0.0.1:${port9}`;
+  const dir9 = path.join(dir, 'case9');
+  fs.mkdirSync(dir9, { recursive: true });
+  const s9 = startServer(port9, {
+    LOCK_PAYOUT_ADDRESS: '1',
+    RENTED_STRATUM_PORT: String(rentedPort9),
+  }, dir9);
+  check('it comes up', !!(await waitUp(base9)), s9.log.slice(-600));
+
+  const primary9 = await stratumClient(port9 + 1);
+  primary9.suggestDifficulty(999999999); // absurdly above the home ceiling (4194304)
+  let msg9 = await primary9.nextMessage();
+  check('the primary port clamps down to ITS OWN ceiling (the home profile\'s)',
+    msg9.method === 'mining.set_difficulty' && msg9.params[0] === 4194304, JSON.stringify(msg9));
+
+  const rented9 = await stratumClient(rentedPort9);
+  rented9.suggestDifficulty(999999999999); // absurdly above the rented ceiling (268435456)
+  msg9 = await rented9.nextMessage();
+  check('the rented port clamps down to ITS OWN, higher ceiling (the rented profile\'s), not the primary\'s',
+    msg9.method === 'mining.set_difficulty' && msg9.params[0] === 268435456, JSON.stringify(msg9));
+
+  primary9.close();
+  rented9.close();
+  kill(s9.child);
 
   await doge.close().catch(() => {});
   fs.rmSync(dir, { recursive: true, force: true });
