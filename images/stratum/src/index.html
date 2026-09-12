@@ -134,6 +134,7 @@ svg{display:block;width:100%;height:auto;min-height:130px}
 .push p{margin:0;font-size:13.5px}
 .pushbtns{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 .pushbtns button:not([hidden]){display:inline-block}
+.pushbtns button.active{color:var(--live);border-color:rgba(139,176,107,.5)}
 .push .empty{padding:10px 0 0}
 /* A nonce'd stylesheet forbids inline style attributes, so spacing that would
    otherwise be a style="" lives here. */
@@ -361,6 +362,16 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
       <button type="button" id="resetCancel" hidden>Cancel</button>
     </div>
     <p class="empty" id="resetHelp">Clears the share counters, the reject reasons and the best share ever — useful after a session of changing miner settings, when an old reject rate hides whether anything is still going wrong. Blocks found are never cleared, and neither is how long this pool has been mining.</p>
+  </div>
+
+  <h2>Mining profile <span class="aside" id="profileAside"></span></h2>
+  <div class="push" id="profileBox">
+    <p id="profileState">Checking…</p>
+    <div class="pushbtns">
+      <button type="button" id="profileHome">Home</button>
+      <button type="button" id="profileRented">Rented</button>
+    </div>
+    <p class="empty" id="profileHelp"></p>
   </div>
 
   <h2>Connect a miner</h2>
@@ -1686,6 +1697,64 @@ async function refreshHistory(){
 }
 
 buildRuler();
+/* ---------- mining profile ----------
+   home vs rented switches ten limits at once — vardiff bounds, connection
+   caps, the message-rate ceiling — see docker-compose.yml for the numbers.
+   Applies live, no restart, to workers already connected as well as new
+   ones. MINING_PROFILE set in .env overrides this control entirely: an
+   operator who fixed it there meant to fix it, so the buttons go inert
+   rather than silently losing to the next reconcile. */
+async function refreshProfileUI(){
+  let d;
+  try{
+    d = await (await fetch('/api/settings', {cache:'no-store'})).json();
+  }catch(err){
+    $('profileState').textContent = 'Could not reach the settings endpoint: ' + err.message;
+    return;
+  }
+  if(!d || !d.ok) return;
+  const homeBtn = $('profileHome'), rentedBtn = $('profileRented');
+  homeBtn.disabled = d.locked || d.profile === 'home';
+  rentedBtn.disabled = d.locked || d.profile === 'rented' || !d.canRent;
+  homeBtn.className = d.profile === 'home' ? 'active' : '';
+  rentedBtn.className = d.profile === 'rented' ? 'active' : '';
+  if(d.locked){
+    $('profileState').textContent = 'Fixed at "' + d.profile + '" by ' + (d.lockedReason || '.env') + '.';
+    $('profileHelp').textContent = 'Remove MINING_PROFILE from .env to control this from the dashboard instead.';
+  } else {
+    $('profileState').textContent = 'Currently on the ' + d.profile + ' profile.';
+    $('profileHelp').textContent = d.canRent
+      ? '"home" is for your own miners on this network. "rented" is for hashpower bought from a ' +
+        'NiceHash-style order — switch to it only while that order is running, and back once it ends.'
+      : 'Switching to "rented" is disabled until LOCK_PAYOUT_ADDRESS=1 is set in .env: that profile ' +
+        'assumes the stratum port is open to the internet, and an unlocked payout on an open port ' +
+        'pays whoever asks.';
+  }
+}
+async function switchProfile(name){
+  $('profileHome').disabled = true;
+  $('profileRented').disabled = true;
+  try{
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({profile: name}),
+    });
+    const out = await res.json();
+    if(!out.ok) throw new Error(out.error || ('HTTP ' + res.status));
+    if(out.persisted === false){
+      $('profileHelp').textContent = 'Switched, but could not be saved to disk — this reverts to the ' +
+        '.env default on the next restart.';
+    }
+  }catch(err){
+    $('profileHelp').textContent = 'Could not switch: ' + err.message;
+  }finally{
+    await refreshProfileUI();
+  }
+}
+$('profileHome').addEventListener('click', () => switchProfile('home'));
+$('profileRented').addEventListener('click', () => switchProfile('rented'));
+
 /* ---------- resetting the counters ----------
    Two clicks, deliberately. This throws away numbers that cannot be
    reconstructed, and it sits one section below a button that sends a test
@@ -1742,6 +1811,7 @@ $('resetGo').addEventListener('click', async () => {
 tick();
 refreshHistory();
 refreshPushUI();
+refreshProfileUI();
 setInterval(tick, 5000);
 setInterval(refreshHistory, 30000);
 document.addEventListener('visibilitychange', () => { if(!document.hidden){ tick(); refreshHistory(); } });

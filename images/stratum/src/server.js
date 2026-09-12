@@ -15,6 +15,7 @@ const { Pool } = require('./pool');
 const { Store } = require('./store');
 const { PushService } = require('./push');
 const { HealthMonitor } = require('./health');
+const { Settings, VALID_PROFILES } = require('./settings');
 
 const PORT = Number(process.env.PORT || 3000);
 const STRATUM_PORT = Number(process.env.STRATUM_PORT || 3333);
@@ -78,6 +79,48 @@ function num(name, fallback) {
     return fallback;
   }
   return v;
+}
+
+// Whether MINING_PROFILE came from the environment. An operator who set it
+// explicitly meant to fix it, so the dashboard's profile toggle (see
+// applyMiningProfile() below) refuses to touch anything in that case rather
+// than silently overriding a deliberate .env choice.
+const profileLockedByEnv =
+  typeof process.env.MINING_PROFILE === 'string' && process.env.MINING_PROFILE.trim() !== '';
+
+// The same resolution num() does — explicit env wins, then the named
+// profile, then the fallback — but parametrised on a profile NAME instead of
+// closed over the one PROFILE picked at startup. That is what lets the
+// profile be switched again later, from applyMiningProfile(), without
+// restarting the process: config's initial values are themselves computed
+// from this (see the Object.assign right after config is built below), so
+// there is exactly one place that knows what each profile means.
+function resolveProfileField(envKey, profileName, fallback, toMs) {
+  const raw = process.env[envKey];
+  let v;
+  if (raw !== undefined && raw !== '') {
+    v = Number(raw);
+    if (!Number.isFinite(v)) v = fallback;
+  } else {
+    const p = PROFILES[profileName] || {};
+    v = Object.prototype.hasOwnProperty.call(p, envKey) ? p[envKey] : fallback;
+  }
+  return toMs ? v * 1000 : v;
+}
+
+function computeProfileFields(profileName) {
+  return {
+    startDifficulty: resolveProfileField('START_DIFFICULTY', profileName, 2048),
+    minDifficulty: resolveProfileField('MIN_DIFFICULTY', profileName, 64),
+    maxDifficulty: resolveProfileField('MAX_DIFFICULTY', profileName, 4194304),
+    maxMessagesPer10s: resolveProfileField('MAX_MESSAGES_PER_10S', profileName, 300),
+    maxConnections: resolveProfileField('MAX_CONNECTIONS', profileName, 64),
+    maxConnectionsPerIp: resolveProfileField('MAX_CONNECTIONS_PER_IP', profileName, 8),
+    maxPayoutVariants: resolveProfileField('MAX_PAYOUT_VARIANTS', profileName, 16),
+    difficultyGraceMs: resolveProfileField('DIFFICULTY_GRACE_SECONDS', profileName, 60, true),
+    socketTimeoutMs: resolveProfileField('SOCKET_TIMEOUT_SECONDS', profileName, 900, true),
+    pingIntervalMs: resolveProfileField('PING_INTERVAL_SECONDS', profileName, 60, true),
+  };
 }
 
 const config = {
@@ -170,6 +213,12 @@ const config = {
   stallRestartMs: num('STALL_RESTART_MINUTES', 15) * 60000,
 };
 
+// Re-derive the ten profile-dependent fields above from computeProfileFields()
+// instead of trusting that its fallback numbers were copied correctly from
+// the num() calls just above. Same values either way — this only removes the
+// chance of the two ever drifting apart.
+Object.assign(config, computeProfileFields(config.profile));
+
 // A safety interlock, not a warning.
 //
 // The rented profile exists for one situation: the stratum port is reachable
@@ -229,6 +278,76 @@ const push = new PushService(
   (msg) => console.log(`[push] ${msg}`)
 );
 push.load();
+
+// The mining profile, editable from the dashboard without SSH or a restart —
+// see settings.js for why this lives beside stats.json and push.json rather
+// than in .env. Skipped entirely when MINING_PROFILE is set in the
+// environment: that operator meant to fix it, and a leftover settings.json
+// from before it was set must not silently un-fix it.
+const settings = new Settings(
+  store.path ? path.join(path.dirname(store.path), 'settings.json') : null,
+  (msg) => console.log(`[settings] ${msg}`)
+);
+const savedProfile = settings.load();
+if (!profileLockedByEnv && savedProfile && savedProfile !== config.profile) {
+  if (savedProfile === 'rented' && !config.lockPayoutAddress) {
+    // Same rule as the interlock below, applied to a profile that arrived
+    // from disk instead of from .env. Refusing to start over this would turn
+    // "someone toggled a dashboard switch on Tuesday" into "the pool has been
+    // down since Tuesday" — falling back to home is the safe direction, and
+    // the dashboard's /api/settings response says why.
+    console.error(
+      `[settings] saved mining profile is "rented" but LOCK_PAYOUT_ADDRESS is not 1 in .env; ` +
+        'staying on "home" until that is set. Switch back from the dashboard once it is.'
+    );
+  } else {
+    config.profile = savedProfile;
+    Object.assign(config, computeProfileFields(savedProfile));
+  }
+}
+
+// The one thing a profile switch actually has to change on a running pool:
+// pool.config is a SEPARATE object from this one (Pool copies it with a
+// spread at construction, `{ ...DEFAULT_LIMITS, ...config }` in pool.js), so
+// mutating `config` alone would update nothing already connected. Every read
+// pool.js does is `this.config.<field>`, fetched fresh each time rather than
+// cached, so mutating pool.config's fields in place — never reassigning
+// pool.config itself — reaches vardiff, new connections and the rate limiter
+// immediately, with no restart and therefore no risk to a block submission in
+// flight (see the stop_grace_period note in docker-compose.yml).
+function applyMiningProfile(name) {
+  if (profileLockedByEnv) {
+    return {
+      ok: false,
+      code: 409,
+      error: 'MINING_PROFILE is set in .env; remove it there to control this from the dashboard.',
+    };
+  }
+  if (!VALID_PROFILES.has(name)) {
+    return { ok: false, code: 400, error: `unknown profile "${name}"` };
+  }
+  if (name === 'rented' && !config.lockPayoutAddress) {
+    return {
+      ok: false,
+      code: 409,
+      error:
+        'set LOCK_PAYOUT_ADDRESS=1 in .env before switching to "rented" — that profile assumes ' +
+        'the stratum port is reachable from the internet, and an unlocked payout on an open port ' +
+        'pays whoever asks.',
+    };
+  }
+  const fields = computeProfileFields(name);
+  Object.assign(config, fields, { profile: name });
+  if (pool) Object.assign(pool.config, fields, { profile: name });
+  const saved = settings.saveProfile(name);
+  if (!saved && settings.path) {
+    console.error(
+      `[settings] profile switched to "${name}" but the change could not be saved (` +
+        `${settings.lastError}); it will revert to the .env default on the next restart`
+    );
+  }
+  return { ok: true, profile: name, persisted: saved };
+}
 
 // The thing that would have noticed the thirteen hours. It lives out here,
 // beside the push service and not inside the Pool, because the case it exists
@@ -392,6 +511,26 @@ async function handleResetPost(req, res) {
   });
 }
 
+// Flip the mining profile from the dashboard. Same CSRF guard as the reset
+// endpoint and for the same reason: this changes live behaviour (and, for
+// "rented", is refused unless the payout is locked), so a page the user
+// merely happens to have open must not be able to trigger it.
+async function handleSettingsPost(req, res) {
+  const reply = (code, body) => {
+    res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+  if (!sameOriginPost(req)) {
+    return reply(403, { ok: false, error: 'cross-site request refused' });
+  }
+  const body = await readJsonBody(req);
+  if (!body || typeof body.profile !== 'string') {
+    return reply(400, { ok: false, error: 'expected { "profile": "home" | "rented" }' });
+  }
+  const result = applyMiningProfile(body.profile.trim().toLowerCase());
+  return reply(result.ok ? 200 : result.code, result);
+}
+
 async function handlePushPost(req, res, pathname) {
   const reply = (code, body) => {
     res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -492,6 +631,18 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/reset') {
     handleResetPost(req, res).catch((err) => {
       console.error('[reset]', err.message);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'internal error' }));
+      } else {
+        res.end();
+      }
+    });
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/settings') {
+    handleSettingsPost(req, res).catch((err) => {
+      console.error('[settings]', err.message);
       if (!res.headersSent) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: 'internal error' }));
@@ -650,6 +801,25 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({ ok: true, name, worker: w }));
+    return;
+  }
+
+  // The dashboard's mining-profile control reads this to know what is active,
+  // whether it can be changed at all, and whether "rented" would currently be
+  // refused — so it can explain that before the user hits the button, not
+  // just after.
+  if (url.pathname === '/api/settings') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        profile: config.profile,
+        available: Array.from(VALID_PROFILES),
+        locked: profileLockedByEnv,
+        lockedReason: profileLockedByEnv ? 'MINING_PROFILE is set in .env' : null,
+        canRent: !!config.lockPayoutAddress,
+      })
+    );
     return;
   }
 

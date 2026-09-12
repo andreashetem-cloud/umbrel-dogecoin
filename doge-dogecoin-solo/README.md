@@ -60,6 +60,27 @@ Put a Dogecoin address in the **username** field and blocks that worker finds
 pay to that address instead of the configured one. That is how these small
 scrypt ASICs are set up anyway, so they work with their normal configuration.
 
+## Switching the mining profile without SSH
+
+The dashboard has a **Mining profile** section with `Home` / `Rented` buttons.
+Pressing one applies instantly — no `.env` edit, no `apps.stop` + `apps.start`,
+and no dropped shares, because it changes the running pool's configuration in
+place rather than starting a new process. The choice is written to this app's
+data directory, so it survives a restart or an update the same way a setting
+in `.env` does.
+
+Switching to `Rented` is refused, from the dashboard, by the same rule that
+already guards it at startup: `LOCK_PAYOUT_ADDRESS=1` must be set in `.env`
+first, because that profile assumes the stratum port is open to the internet
+and an unlocked payout on an open port pays whoever asks. The button explains
+this when it applies.
+
+If `MINING_PROFILE` is set in `.env`, the dashboard control goes read-only and
+says so — an operator who fixed it there meant to fix it, and a button that
+silently overrode that would be a worse surprise than not having the button.
+Remove the line from `.env` (and restart the app) to hand control back to the
+dashboard.
+
 ## Difficulty, and why the numbers look large
 
 Scrypt stratum difficulty is not Bitcoin's. Every piece of scrypt mining

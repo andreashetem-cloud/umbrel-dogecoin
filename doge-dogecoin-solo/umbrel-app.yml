@@ -5,7 +5,7 @@ category: bitcoin
 # Litecoin Solo Mining" was shown as "Dogecoin + Litecoi…", which loses the one
 # word that says what the app is for.
 name: DOGE + LTC Solo
-version: "1.4.0"
+version: "1.5.0"
 tagline: Solo mine Dogecoin, or merge-mine Dogecoin and Litecoin, on your own nodes
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -57,6 +57,17 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  The mining profile can now be switched from the dashboard — no SSH, no editing .env, no
+  restart. A "home" / "rented" control under a new Mining profile section applies instantly,
+  to workers already connected as well as new ones, because it mutates the running pool's
+  configuration directly rather than requiring a fresh process. The choice is written to the
+  app's data directory, so it survives a restart or an update the same way settings in .env
+  do. Switching to "rented" is refused, live, by the same interlock that already guarded it
+  at startup: LOCK_PAYOUT_ADDRESS=1 must be set in .env first, because that profile assumes
+  the stratum port is open to the internet. The control goes read-only, and says so, whenever
+  MINING_PROFILE is set explicitly in .env — an operator who fixed it there meant to fix it.
+
+
   This app can now tell you when it has stopped mining. After an umbrelOS restart both node
   apps stayed down, this app kept answering its own healthcheck — which only ever checked its
   own web server — and thirteen hours passed with nothing mined and nothing said. The
