@@ -5,7 +5,7 @@ category: bitcoin
 # Litecoin Solo Mining" was shown as "Dogecoin + Litecoi…", which loses the one
 # word that says what the app is for.
 name: DOGE + LTC Solo
-version: "1.6.0"
+version: "1.6.1"
 tagline: Solo mine Dogecoin, or merge-mine Dogecoin and Litecoin, on your own nodes
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -57,6 +57,12 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  The Mining profile section stayed silent about the rented port in one case: when
+  MINING_PROFILE was fixed in .env, the "Fixed at ..." message never mentioned a
+  configured RENTED_STRATUM_PORT, even though that port was running fine. It now
+  says so and gives the port number, the same way the unlocked view already did.
+
+
   Your own miners and a rented order can now run at the same time. RENTED_STRATUM_PORT opens a
   second, dedicated stratum port that always runs the rented profile's numbers, alongside the
   main one running whatever MINING_PROFILE says. Before this release the mining profile was one

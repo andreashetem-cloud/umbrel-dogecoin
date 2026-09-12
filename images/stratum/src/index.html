@@ -1743,7 +1743,13 @@ async function refreshProfileUI(){
   rentedBtn.className = d.profile === 'rented' ? 'active' : '';
   if(d.locked){
     $('profileState').textContent = 'Fixed at "' + d.profile + '" by ' + (d.lockedReason || '.env') + '.';
-    $('profileHelp').textContent = 'Remove MINING_PROFILE from .env to control this from the dashboard instead.';
+    $('profileHelp').textContent = 'Remove MINING_PROFILE from .env to control this from the dashboard instead.' +
+      (d.rentedStratumPort
+        ? ' A dedicated rented-capacity port is also configured, on ' + d.rentedStratumPort + ' — see ' +
+          '"Connect a miner" below. That port always runs the rented profile\'s numbers on its own, ' +
+          'regardless of what MINING_PROFILE is fixed to here, so your own miners on the main port never ' +
+          'need to move for a rented order.'
+        : '');
   } else {
     $('profileState').textContent = 'Currently on the ' + d.profile + ' profile.';
     $('profileHelp').textContent = d.canRent
