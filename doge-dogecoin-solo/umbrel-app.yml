@@ -5,7 +5,7 @@ category: bitcoin
 # Litecoin Solo Mining" was shown as "Dogecoin + Litecoi…", which loses the one
 # word that says what the app is for.
 name: DOGE + LTC Solo
-version: "1.5.0"
+version: "1.6.0"
 tagline: Solo mine Dogecoin, or merge-mine Dogecoin and Litecoin, on your own nodes
 description: >-
   A stratum server that turns your Dogecoin node into a solo mining pool of one.
@@ -57,6 +57,29 @@ deterministicPassword: false
 torOnly: false
 installSize: 200000000
 releaseNotes: >-
+  Your own miners and a rented order can now run at the same time. RENTED_STRATUM_PORT opens a
+  second, dedicated stratum port that always runs the rented profile's numbers, alongside the
+  main one running whatever MINING_PROFILE says. Before this release the mining profile was one
+  port switched between two regimes, so switching to "rented" for an order re-difficultied every
+  home ASIC still connected to the same port — it did not disconnect, it just stopped finding
+  shares, which looked exactly like the miner breaking the moment hashpower was rented. Now
+  each port keeps its own connection ceilings, message-rate limits and difficulty bounds,
+  enforced separately, and a live switch of the main port's profile — the dashboard control
+  from the previous release — reaches workers already connected on that port without ever
+  touching the dedicated one. Requires LOCK_PAYOUT_ADDRESS=1, exactly like MINING_PROFILE=
+  rented, and is meant to be forwarded on your router only while an order is running. The
+  worker table now labels which port each connection came in on, and the dashboard shows a
+  second connect URL whenever this port is configured — including when it was configured but
+  failed to bind, which used to look identical to never having set it at all.
+
+
+  This app's port footprint grows by one either way: Docker Compose cannot publish a port
+  only conditionally, so 22558 is now claimed on every device from this version onward,
+  whether or not RENTED_STRATUM_PORT is ever set — the same way 22557 always has been even
+  for an operator who never rents hashpower. If something else on your device already uses
+  22558, set RENTED_STRATUM_PORT in .env to a free port before updating.
+
+
   The mining profile can now be switched from the dashboard — no SSH, no editing .env, no
   restart. A "home" / "rented" control under a new Mining profile section applies instantly,
   to workers already connected as well as new ones, because it mutates the running pool's

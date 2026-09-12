@@ -14,7 +14,7 @@ services:
       PROXY_AUTH_ADD: "true"
 
   app:
-    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.5.0
+    image: ghcr.io/andreashetem-cloud/umbrel-dogecoin-stratum:1.6.0
     restart: on-failure
     logging: *default-logging
     # Docker's default is 10 seconds, and the shutdown handler waits up to 130
@@ -33,11 +33,42 @@ services:
       # this on your router — anyone who reaches it can mine to their own
       # address using your node's block templates.
       - "22557:22557"
+      # The dedicated rented-capacity port — see RENTED_STRATUM_PORT below.
+      # Docker Compose has no way to publish a port only conditionally
+      # through variable substitution alone — the list entry above it is
+      # proof: an unset variable here with no fallback renders as ":" (an
+      # empty host port), which is invalid and refuses the whole container.
+      # So, exactly like port 22557, this one is claimed on the host WHETHER
+      # OR NOT you ever set RENTED_STRATUM_PORT — this app's port footprint
+      # is now 22551/22557/22558, not 22551/22557. If 22558 is already used
+      # by something else on your device, override the fallback below to
+      # something free, in .env, as RENTED_STRATUM_PORT — that also reserves
+      # the same number for the feature itself if you later turn it on.
+      # Until RENTED_STRATUM_PORT is set the app does not LISTEN here, so a
+      # connection is simply refused, exactly as if nothing were running —
+      # but the host port is reserved regardless, the same way 22557 always
+      # has been even for an operator who has never rented hashpower. Meant
+      # to be forwarded on your router only while an order is actually
+      # running, and un-forwarded the moment it ends.
+      - "${RENTED_STRATUM_PORT:-22558}:${RENTED_STRATUM_PORT:-22558}"
     environment:
       PORT: "3000"
       STRATUM_PORT: "22557"
       # Where the durable statistics live. Set to an empty string to disable.
       STATS_PATH: "/data/stats.json"
+
+      # ---------------------------------------------------------------------
+      # A second, optional stratum port — see the long comment at
+      # MINING_PROFILE below for why this exists and how it differs from
+      # switching that one setting. Unset by default: nothing about an
+      # install that never sets this changes.
+      #
+      # Set in .env, like everything device-specific:
+      #     RENTED_STRATUM_PORT=22558
+      # and forward that port on your router while an order is running.
+      # Requires LOCK_PAYOUT_ADDRESS=1 for the same reason MINING_PROFILE=
+      # rented does — this port is meant to be reachable from the internet.
+      RENTED_STRATUM_PORT: "${RENTED_STRATUM_PORT:-}"
 
       # The Dogecoin node app. Full container name rather than the bare service
       # name: every Umbrel app shares one docker network, so service aliases can
@@ -175,6 +206,16 @@ services:
       # merge-mines both on the same hashes. Pointing it at a DOGE-only node
       # throws that half away, so the expected return is roughly 25% below what
       # you pay. It buys a real end-to-end test and a lottery ticket, not profit.
+      #
+      # The limitation this setting has: it is ONE port switched between two
+      # regimes, so your own home miners and a rented order can never both be
+      # correctly configured at the same time. Switch to "rented" for the
+      # order and a home ASIC still connected gets the same jump in starting
+      # difficulty — it does not disconnect, it just stops finding shares,
+      # which looks exactly like the miner failing the moment you rent
+      # hashpower. If you want both running together, see
+      # RENTED_STRATUM_PORT above instead: a second port, always at the
+      # rented numbers, that leaves this one alone.
       # ---------------------------------------------------------------------
       # Also read from .env, so switching to a rented order for a day and back
       # again does not mean editing a file the next update overwrites:

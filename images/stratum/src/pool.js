@@ -67,6 +67,24 @@ class Pool extends EventEmitter {
     super();
     this.config = { ...DEFAULT_LIMITS, ...config };
     config = this.config;
+
+    // Two independent regimes can listen at once — see onConnection and the
+    // rented port in start(). The PRIMARY port deliberately has no limits
+    // object of its own: `this.config` already carries its ten numbers, and
+    // is exactly the object the dashboard's live profile switch (see
+    // server.js's applyMiningProfile) mutates in place — so a primary client
+    // whose `limits` is `this.config`, by reference rather than by copy,
+    // keeps seeing a switch made after it connected, precisely matching the
+    // "applies live, to workers already connected too" behaviour that switch
+    // was built for. `rentedPortLimits` is a genuinely separate, frozen copy:
+    // there is no live-switch mechanism for it, and it must never be moved by
+    // a mutation aimed at the primary port. Stays null unless server.js
+    // actually configured a second port, which is the common case: one port,
+    // one set of limits, exactly as before this existed.
+    this.rentedPortLimits = config.rentedPortLimits
+      ? { ...DEFAULT_LIMITS, ...config.rentedPortLimits }
+      : null;
+
     // Optional durable history. Everything below works without it; the pool
     // simply forgets on restart.
     this.store = store;
@@ -226,6 +244,41 @@ class Pool extends EventEmitter {
     // emitSafely covers the same hazard for later errors.
     this.server.on('error', (err) => this.emitSafely('error', err));
 
+    // The rented-capacity port, if server.js configured one. Deliberately NOT
+    // fatal on failure the way the primary bind above is: the home miners on
+    // the primary port did nothing wrong, and losing them because a second,
+    // optional port could not bind — a stale container from a crashed
+    // previous run, a typo'd port number already taken by something else —
+    // would be a worse outcome than simply not having that port this run.
+    if (this.rentedPortLimits) {
+      this.rentedServer = net.createServer((socket) => this.onConnection(socket, 'rented'));
+      try {
+        await new Promise((resolve, reject) => {
+          const onError = (err) => reject(err);
+          this.rentedServer.once('error', onError);
+          this.rentedServer.listen(this.config.rentedStratumPort, '0.0.0.0', () => {
+            this.rentedServer.removeListener('error', onError);
+            resolve();
+          });
+        });
+        this.rentedServer.on('error', (err) => this.emitSafely('error', err));
+        this.log(`rented-capacity stratum listening on 0.0.0.0:${this.config.rentedStratumPort}`);
+      } catch (err) {
+        this.log(
+          `could not bind the rented-capacity port ${this.config.rentedStratumPort} (${err.message}); ` +
+            'continuing with the primary port only'
+        );
+        // Only the SERVER goes away here. `rentedPortLimits` deliberately
+        // stays set: nothing calls onConnection with entry 'rented' once
+        // this.rentedServer is null, so it is never used to accept a
+        // connection — but snapshot() still needs it to tell "configured,
+        // failed to bind" apart from "never configured" (see rentedServer vs
+        // rentedStratumPort there), and a wrongly-nulled value here used to
+        // collapse those into the same, silent, dashboard-invisible state.
+        this.rentedServer = null;
+      }
+    }
+
     this.started = true;
 
     // Sample the combined hashrate once a minute. This is what the dashboard's
@@ -260,9 +313,20 @@ class Pool extends EventEmitter {
     this.saveTimer.unref();
 
     this.pingTimer = setInterval(() => {
-      for (const c of this.clients.values()) this.pingClient(c);
+      for (const c of this.clients.values()) if (c.entry !== 'rented') this.pingClient(c);
     }, this.config.pingIntervalMs);
     this.pingTimer.unref();
+
+    // A second timer at the rented profile's own — much longer — interval. A
+    // connection at rented difficulty is legitimately quiet for minutes, and
+    // pinging it every 60s like a home ASIC would just be noise on a link
+    // that is fine.
+    if (this.rentedPortLimits) {
+      this.rentedPingTimer = setInterval(() => {
+        for (const c of this.clients.values()) if (c.entry === 'rented') this.pingClient(c);
+      }, this.rentedPortLimits.pingIntervalMs);
+      this.rentedPingTimer.unref();
+    }
 
     // Skipped while a refresh is still in flight. Without this, a poll every
     // two seconds against a node whose getblocktemplate occasionally takes
@@ -395,6 +459,7 @@ class Pool extends EventEmitter {
     clearInterval(this.sampleTimer);
     clearInterval(this.saveTimer);
     clearInterval(this.pingTimer);
+    clearInterval(this.rentedPingTimer);
     this.pollTimer = null;
     // Force a final write: an update or a reboot must not cost the last half
     // minute of history.
@@ -404,6 +469,7 @@ class Pool extends EventEmitter {
     this.stopped = true;
     this.started = false;
     if (this.server) this.server.close();
+    if (this.rentedServer) this.rentedServer.close();
     for (const c of this.clients.values()) {
       clearTimeout(c.handshakeTimer);
       c.socket.destroy();
@@ -420,6 +486,9 @@ class Pool extends EventEmitter {
     this.draining = true;
     if (this.server) {
       try { this.server.close(); } catch { /* already closed */ }
+    }
+    if (this.rentedServer) {
+      try { this.rentedServer.close(); } catch { /* already closed */ }
     }
   }
 
@@ -1117,24 +1186,45 @@ class Pool extends EventEmitter {
 
   // ------------------------------------------------------------------ clients
 
-  onConnection(socket) {
+  // `entry` says which listening socket accepted this connection —
+  // 'primary' (the home/whatever-MINING_PROFILE-says port, always up) or
+  // 'rented' (the dedicated high-difficulty port, only up when server.js
+  // configured one). It picks the client's limits once, here, and nothing
+  // later ever moves a live connection between the two: a worker that wants
+  // the other regime reconnects to the other port, the same way it would
+  // point at a different pool.
+  onConnection(socket, entry = 'primary') {
+    // For 'primary' this is `this.config` itself, BY REFERENCE — see the
+    // comment on `this.rentedPortLimits` in the constructor for why that
+    // matters: it is what keeps a live MINING_PROFILE switch reaching workers
+    // that connected before the switch, not just new ones.
+    const limits = entry === 'rented' ? this.rentedPortLimits : this.config;
+
     // Stratum has no authentication — by design, since there is no account to
     // authenticate against. That makes an unbounded connection count a trivial
-    // resource-exhaustion path for anyone on the LAN, so it gets a ceiling.
-    if (this.clients.size >= this.config.maxConnections) {
-      this.churnLog(`refused a connection from ${socket.remoteAddress}: at the ${this.config.maxConnections}-connection limit`);
+    // resource-exhaustion path for anyone who can reach a port, so it gets a
+    // ceiling — counted PER PORT, not pool-wide, so a rented order's much
+    // larger allowance can never starve the home port's much smaller one, and
+    // a reconnecting home miner can never eat the slots a rented order is
+    // waiting for either.
+    let sameEntry = 0;
+    for (const c of this.clients.values()) if (c.entry === entry) sameEntry++;
+    if (sameEntry >= limits.maxConnections) {
+      this.churnLog(`refused a ${entry} connection from ${socket.remoteAddress}: at the ${limits.maxConnections}-connection limit`);
       socket.destroy();
       return;
     }
 
-    // A global ceiling alone is not enough: one machine opening bare TCP
-    // sockets — sending nothing, so the message rate limit never applies —
-    // would take every slot and lock out the real miners. Cap per source too.
+    // A ceiling alone is not enough: one machine opening bare TCP sockets —
+    // sending nothing, so the message rate limit never applies — would take
+    // every slot and lock out the real miners. Cap per source too, again
+    // scoped to this port: a rented order legitimately arrives as many
+    // connections from a handful of its provider's addresses.
     const remote = socket.remoteAddress || 'unknown';
     let fromThisHost = 0;
-    for (const c of this.clients.values()) if (c.remote === remote) fromThisHost++;
-    if (fromThisHost >= this.config.maxConnectionsPerIp) {
-      this.churnLog(`refused a connection from ${remote}: already has ${fromThisHost}`);
+    for (const c of this.clients.values()) if (c.entry === entry && c.remote === remote) fromThisHost++;
+    if (fromThisHost >= limits.maxConnectionsPerIp) {
+      this.churnLog(`refused a ${entry} connection from ${remote}: already has ${fromThisHost}`);
       socket.destroy();
       return;
     }
@@ -1146,12 +1236,24 @@ class Pool extends EventEmitter {
     const client = {
       id,
       socket,
+      // Fixed for the life of the connection — see the comment on
+      // onConnection above.
+      entry,
+      limits,
       extranonce1,
       subscribed: false,
       authorized: false,
       worker: null,
       payoutAddress: null,
-      difficulty: this.config.startDifficulty,
+      // Clamped, not trusted as-is: START_DIFFICULTY is an explicit env
+      // override that applies to BOTH ports at once (see resolveProfileField
+      // in server.js), so a value chosen to tune the primary port can land
+      // outside the OTHER port's own min/max — a rented order handed a home-
+      // sized starting difficulty would flood the message-rate limit before
+      // vardiff ever got a chance to correct it. Belt and braces: whatever
+      // combination of overrides produced `limits`, a fresh connection can
+      // never start below its own floor or above its own ceiling.
+      difficulty: clamp(limits.startDifficulty, limits.minDifficulty, limits.maxDifficulty),
       pendingDifficulty: null,
       connectedAt: Date.now(),
       lastShareAt: null,
@@ -1179,7 +1281,7 @@ class Pool extends EventEmitter {
 
     socket.setKeepAlive(true, 60000);
     socket.setNoDelay(true);
-    socket.setTimeout(this.config.socketTimeoutMs);
+    socket.setTimeout(limits.socketTimeoutMs);
 
     // Defence in depth: anything thrown inside a socket event handler that is
     // not caught takes the whole process down, and this handler parses input
@@ -1233,7 +1335,7 @@ class Pool extends EventEmitter {
         client.rateWindowAt = now;
         client.rateCount = 0;
       }
-      if (++client.rateCount > this.config.maxMessagesPer10s) {
+      if (++client.rateCount > client.limits.maxMessagesPer10s) {
         this.log(`worker ${client.worker || client.id} exceeded the message rate limit; disconnecting`);
         client.socket.destroy();
         return;
@@ -1430,7 +1532,7 @@ class Pool extends EventEmitter {
   handleSuggestDifficulty(client, msg) {
     const suggested = Number((msg.params || [])[0]);
     if (Number.isFinite(suggested) && suggested > 0) {
-      const clamped = clamp(suggested, this.config.minDifficulty, this.config.maxDifficulty);
+      const clamped = clamp(suggested, client.limits.minDifficulty, client.limits.maxDifficulty);
       this.setDifficulty(client, clamped);
     }
     this.reply(client, msg.id, true);
@@ -1445,7 +1547,7 @@ class Pool extends EventEmitter {
     if (client.target) {
       client.previousTarget = client.target;
       client.previousDifficulty = client.difficulty;
-      client.previousTargetUntil = Date.now() + this.config.difficultyGraceMs;
+      client.previousTargetUntil = Date.now() + client.limits.difficultyGraceMs;
       this.rememberTarget(client, client.target);
     }
     client.difficulty = difficulty;
@@ -1936,8 +2038,8 @@ class Pool extends EventEmitter {
     // rounding step push the result back outside the configured bounds.
     const next = clamp(
       roundDifficulty(client.difficulty * clamp(ratio, 0.25, 4)),
-      this.config.minDifficulty,
-      this.config.maxDifficulty
+      client.limits.minDifficulty,
+      client.limits.maxDifficulty
     );
     if (Math.abs(next - client.difficulty) / client.difficulty < 0.1) return;
 
@@ -1974,6 +2076,10 @@ class Pool extends EventEmitter {
       .filter((c) => c.authorized)
       .map((c) => ({
         id: c.id,
+        // Which port this worker is on — 'primary' or 'rented'. Lets the
+        // dashboard label a worker instead of leaving it to be inferred from
+        // its difficulty, which a fast home miner can otherwise approach.
+        entry: c.entry,
         worker: c.worker,
         userAgent: c.userAgent,
         remote: c.remote,
@@ -2013,6 +2119,14 @@ class Pool extends EventEmitter {
       mergedMining: !!this.merged,
       merged,
       stratumPort: this.config.stratumPort,
+      // Null only when no second port was ever configured. Stays the actual
+      // port number even if binding it failed (see the catch in start()) —
+      // that is what lets the dashboard tell "configured, failed to bind"
+      // apart from "never configured" using rentedPortActive below, instead
+      // of both states collapsing into the same blank connect box while the
+      // rented port silently loses whatever is pointed at it.
+      rentedStratumPort: this.rentedPortLimits ? this.config.rentedStratumPort : null,
+      rentedPortActive: !!this.rentedServer,
       payoutAddress: this.config.payoutAddress,
       lockPayoutAddress: !!this.config.lockPayoutAddress,
       profile: this.config.profile || 'home',

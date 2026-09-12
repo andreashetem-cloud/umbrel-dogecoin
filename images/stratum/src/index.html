@@ -381,6 +381,10 @@ footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
     <div class="r"><span class="k">Password</span><span class="v">x</span><button data-copy-text="x">Copy</button></div>
   </div>
   <p class="empty" id="connectNote"></p>
+  <div class="kv" id="rentedConnectBox" hidden>
+    <div class="r"><span class="k">Rented stratum URL</span><span class="v" id="cUrlRented">—</span><button data-copy="cUrlRented">Copy</button></div>
+  </div>
+  <p class="empty" id="rentedConnectNote" hidden></p>
 
   <h2>Network</h2>
   <div class="kv">
@@ -1542,7 +1546,11 @@ async function tick(){
       const idle = !w.lastShareAt || Date.now() - w.lastShareAt > 300000;
       const health = workerHealth(w);
       h += '<tr class="wrow" tabindex="0" role="button" data-worker="' + esc(w.worker) + '">' +
-        '<td><div class="wname">' + esc(w.worker) + '</div>' +
+        '<td><div class="wname">' + esc(w.worker) +
+          // Only shown once a second port is actually in use — on a pool
+          // with just the one port this is silent, exactly as before.
+          (w.entry === 'rented' ? ' <span class="tag">rented port</span>' : '') +
+          '</div>' +
           '<div class="wsub">' + esc(w.userAgent || w.remote || '') + '</div>' +
           // Phone-only line. Below 640px the numeric columns are hidden to keep
           // the table readable, and a difficulty you can only see on a laptop
@@ -1594,6 +1602,21 @@ async function tick(){
   $('connectNote').textContent = d.lockPayoutAddress
     ? 'Every block pays the address above, whatever a worker puts in the username field — that is what LOCK_PAYOUT_ADDRESS does, and it is why this port is safe to expose. Use the username for a name you will recognise in the table. The password is ignored; miners insist on one, so send anything.'
     : 'Put a Dogecoin address in the username field and any block that worker finds pays that address. Anything else falls back to the address configured for this app. The password is ignored — miners insist on one, so send anything.';
+
+  // The dedicated rented-capacity port — see RENTED_STRATUM_PORT in the
+  // README. Hidden entirely unless it was actually configured, so a pool
+  // that has never touched this feature sees nothing new here.
+  if(d.rentedStratumPort){
+    $('rentedConnectBox').hidden = false;
+    $('rentedConnectNote').hidden = false;
+    $('cUrlRented').textContent = 'stratum+tcp://' + location.hostname + ':' + d.rentedStratumPort;
+    $('rentedConnectNote').textContent = d.rentedPortActive
+      ? 'Point a rented order at this port instead of the one above. It always runs the rented profile’s numbers, whatever the Mining profile section is currently set to — switching that control never touches this port.'
+      : 'Configured but not currently listening. Check the container log — a clash with another port, or a bind failure, falls back to the primary port only.';
+  } else {
+    $('rentedConnectBox').hidden = true;
+    $('rentedConnectNote').hidden = true;
+  }
 
   // blocks
   const TAGS = {
@@ -1725,7 +1748,11 @@ async function refreshProfileUI(){
     $('profileState').textContent = 'Currently on the ' + d.profile + ' profile.';
     $('profileHelp').textContent = d.canRent
       ? '"home" is for your own miners on this network. "rented" is for hashpower bought from a ' +
-        'NiceHash-style order — switch to it only while that order is running, and back once it ends.'
+        'NiceHash-style order — switch to it only while that order is running, and back once it ends.' +
+        (d.rentedStratumPort ? '' :
+          ' Switching this affects every worker on the main port at once. To run your own miners ' +
+          'and a rented order at the same time instead, set RENTED_STRATUM_PORT in .env — a second, ' +
+          'dedicated port that leaves this one alone.')
       : 'Switching to "rented" is disabled until LOCK_PAYOUT_ADDRESS=1 is set in .env: that profile ' +
         'assumes the stratum port is open to the internet, and an unlocked payout on an open port ' +
         'pays whoever asks.';

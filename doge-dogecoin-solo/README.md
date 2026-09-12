@@ -43,7 +43,8 @@ Recognised keys, all optional except the first:
 | Key | Default | What it does |
 | --- | --- | --- |
 | `PAYOUT_ADDRESS` | — | Dogecoin address for block rewards. Required. |
-| `MINING_PROFILE` | `home` | `home` or `rented`; switches every limit at once. |
+| `MINING_PROFILE` | `home` | `home` or `rented`; switches every limit on the main port at once. |
+| `RENTED_STRATUM_PORT` | — | A second, dedicated port that is always at the rented profile's numbers — see below. |
 | `MERGED_MINING` | `0` | `1` to mine Dogecoin and Litecoin from the same hashes. |
 | `POLL_INTERVAL_SECONDS` | `2` | How often the Dogecoin aux block is refreshed. Floored at 0.5. |
 | `LTC_PAYOUT_ADDRESS` | — | Litecoin address (`L…`, `M…` or `3…`). Required when merged. |
@@ -80,6 +81,48 @@ says so — an operator who fixed it there meant to fix it, and a button that
 silently overrode that would be a worse surprise than not having the button.
 Remove the line from `.env` (and restart the app) to hand control back to the
 dashboard.
+
+## Running your own miners and a rented order at the same time
+
+`MINING_PROFILE` has one real limitation: it is a single port switched
+between two regimes, so your own home miners and a rented order can never
+both be correctly configured at once. Switch to `rented` for the order and a
+home ASIC still connected gets the same jump in starting difficulty — it
+does not disconnect, it just stops finding shares fast enough to look alive,
+which reads as "my miner broke the moment I rented hashpower."
+
+`RENTED_STRATUM_PORT` fixes that by opening a **second** stratum port,
+always at the rented profile's numbers, running at the same time as the
+main one:
+
+```
+RENTED_STRATUM_PORT=22558
+```
+
+Point your own miners at the usual port (`22557`) as always. Point a rented
+order at this one instead. Neither setup has to know the other exists —
+switching or restarting one never touches the other, because they are two
+separate listeners with two separate sets of limits, not one port whose
+meaning changes.
+
+Like `MINING_PROFILE=rented`, this requires `LOCK_PAYOUT_ADDRESS=1` — the
+app refuses to start otherwise, for the same reason: this port is meant to
+be reachable from the internet, and an unlocked payout on an open port pays
+whoever asks. It is also meant to be **forwarded on your router only while
+an order is running**, and un-forwarded the moment it ends, exactly like the
+main port under `MINING_PROFILE=rented`.
+
+An explicit override (`START_DIFFICULTY` and the rest, listed under
+"Difficulty, and why the numbers look large" below) still wins over any
+profile everywhere it applies — including on this port. If you have one of
+those set to fix the main port's currently active profile, the same value
+reaches this port too.
+
+The dashboard's "Mining profile" section shows whether this port is
+configured, and each row in the worker table is labelled with which port
+that worker is actually connected to — useful once both are in use at once,
+since a fast home device and a slow rented one can otherwise look similar
+on the page.
 
 ## Difficulty, and why the numbers look large
 
@@ -140,6 +183,7 @@ against assumptions:
 |---|---|---|
 | 22551 | Dashboard, behind the umbrelOS login | No |
 | 22557 | Stratum | **No** — anyone who reaches it can mine to their own address using your node's templates |
+| 22558 | The dedicated rented-capacity port. Claimed on the host from 1.6.0 onward whether or not you use it — Docker Compose cannot publish a port only conditionally — but the app only *listens* here once `RENTED_STRATUM_PORT` is set in `.env`. If something else on your device already uses 22558, set `RENTED_STRATUM_PORT` to a free port instead. | **Only while a rented order is running** — un-forward it the moment the order ends |
 
 ## Configuration
 

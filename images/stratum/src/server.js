@@ -20,6 +20,33 @@ const { Settings, VALID_PROFILES } = require('./settings');
 const PORT = Number(process.env.PORT || 3000);
 const STRATUM_PORT = Number(process.env.STRATUM_PORT || 3333);
 
+// A second, optional stratum port, always at the rented profile's numbers,
+// running AT THE SAME TIME as the primary one — see pool.js's onConnection.
+// Unset by default, which is exactly today's single-port behaviour: nothing
+// about an install that never sets this changes.
+//
+// The point of it: MINING_PROFILE switches the ONE port between two regimes,
+// so a home ASIC and a rented order can never both be connected and correct
+// at once — whichever one the port isn't currently set for gets the wrong
+// difficulty and either floods the flood limit or starves at a difficulty it
+// can't reach. Two ports sidesteps the choice: point home miners at
+// STRATUM_PORT as always, point a rented order at this one, and neither
+// setup ever has to know the other exists.
+let RENTED_STRATUM_PORT = null;
+{
+  const raw = process.env.RENTED_STRATUM_PORT;
+  if (raw !== undefined && raw.trim() !== '') {
+    const v = Number(raw);
+    if (!Number.isInteger(v) || v <= 0 || v > 65535) {
+      console.error(`[config] RENTED_STRATUM_PORT="${raw}" is not a valid port; the rented-capacity port stays off`);
+    } else if (v === STRATUM_PORT || v === PORT) {
+      console.error(`[config] RENTED_STRATUM_PORT (${v}) clashes with an existing port; the rented-capacity port stays off`);
+    } else {
+      RENTED_STRATUM_PORT = v;
+    }
+  }
+}
+
 // Two very different machines point at this pool, and one set of numbers cannot
 // serve both.
 //
@@ -186,6 +213,17 @@ const config = {
   lockPayoutAddress: process.env.LOCK_PAYOUT_ADDRESS === '1',
   profile: PROFILE_NAME in PROFILES ? PROFILE_NAME : 'home',
 
+  // The dedicated rented-capacity port. Null (off) unless RENTED_STRATUM_PORT
+  // parsed to a valid, non-clashing port above. rentedPortLimits is always
+  // the 'rented' profile's numbers — not whatever MINING_PROFILE currently
+  // selects for the primary port — because the whole point of this port is
+  // to be correct for a rented order regardless of what the primary port is
+  // doing. Anything set explicitly in the environment (START_DIFFICULTY and
+  // the rest) still wins here too, exactly as it does for the primary port's
+  // profile — see resolveProfileField.
+  rentedStratumPort: RENTED_STRATUM_PORT,
+  rentedPortLimits: RENTED_STRATUM_PORT ? computeProfileFields('rented') : null,
+
   // --- watching the nodes ---------------------------------------------------
   // On unless explicitly switched off: a second longpoll, against dogecoind's
   // getblocktemplate, used purely as a "the aux tip has moved" signal. See
@@ -233,6 +271,18 @@ if (config.profile === 'rented' && !config.lockPayoutAddress) {
     '[config] MINING_PROFILE=rented is meant for a stratum port that is reachable from ' +
       'the internet, where anyone can mine to their own address unless the payout is locked. ' +
       'Set LOCK_PAYOUT_ADDRESS=1, or switch back to MINING_PROFILE=home.'
+  );
+  process.exit(1);
+}
+
+// The same interlock, for the same reason, for the dedicated rented port:
+// RENTED_STRATUM_PORT exists to be reachable from the internet too, and an
+// unlocked payout on an open port pays whoever asks — whether that port is
+// the primary one running the rented profile, or this second one.
+if (config.rentedStratumPort && !config.lockPayoutAddress) {
+  console.error(
+    '[config] RENTED_STRATUM_PORT is set, which opens a second stratum port meant to be reachable ' +
+      'from the internet for a rented order. Set LOCK_PAYOUT_ADDRESS=1, or remove RENTED_STRATUM_PORT.'
   );
   process.exit(1);
 }
@@ -818,6 +868,12 @@ const server = http.createServer((req, res) => {
         locked: profileLockedByEnv,
         lockedReason: profileLockedByEnv ? 'MINING_PROFILE is set in .env' : null,
         canRent: !!config.lockPayoutAddress,
+        // The dedicated rented-capacity port's configuration, as distinct from
+        // whether it actually bound — that lives on /api/status's snapshot,
+        // which needs a running pool to answer at all. This endpoint has to
+        // work even before the pool exists, so it can only say what was
+        // configured, not what is currently listening.
+        rentedStratumPort: config.rentedStratumPort || null,
       })
     );
     return;
